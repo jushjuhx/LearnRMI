@@ -13,6 +13,9 @@
         <module>x01_demo_server</module>
         <module>x01_demo</module>
         <module>client</module>
+        <module>x02_cve_2017_3241</module>
+        <module>x02_cve_2017_3241_server</module>
+        <module>x02_cve_2017_3241_client</module>
     </modules>
 
 

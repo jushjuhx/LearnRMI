@@ -1,6 +1,7 @@
 import sun.rmi.registry.RegistryImpl;
 
 import javax.naming.InitialContext;
+import java.io.ObjectInputStream;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 

