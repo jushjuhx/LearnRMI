@@ -16,6 +16,8 @@
         <module>x02_cve_2017_3241</module>
         <module>x02_cve_2017_3241_server</module>
         <module>x02_cve_2017_3241_client</module>
+        <module>x03_jndi_demo_client</module>
+        <module>x03_jndi_demo_server</module>
     </modules>
 
 
