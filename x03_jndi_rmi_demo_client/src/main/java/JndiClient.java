@@ -6,6 +6,5 @@ public class JndiClient {
         Context ctx = new InitialContext();
         Object x = ctx.lookup("rmi://127.0.0.1:1099/anything");
         System.out.println(x);
-
     }
 }

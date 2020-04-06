@@ -1,4 +1,6 @@
-# 使用方式
+# 一、JndiServer
+
+## 1.1 使用
 1. 编译恶意文类：javac RemoteEvilObject.java 
 2. 打包：jar cvf  remote.jar  RemoteEvilObject.class
 2. 运行HTTP服务器python -m SimpleHTTPServer 8086
@@ -11,7 +13,7 @@
 }
 ```
 
-# 说明
+## 1.2 说明
 服务端将一个`ReferenceWrapper`对象绑定到`anything`上，这个对象中`Reference`指向了一个远端地址。
 当客户端执行`InitialContext.lookup()`时，会进入`com.sun.jndi.rmi.registry.RegistryContext.decodeObject`，
 进而执行`NamingManager.getObjectInstance`获取`Reference`实例对象，本例中就是`RemoteEvilObject`，
@@ -100,7 +102,7 @@ javax.naming.InitialContext.lookup(InitialContext.java:411)
 JndiClient.main(JndiClient.java:28)
 ```
 
-# 限制
+## 1.3 限制
 利用条件如下：
 
 1. RMI客户端的上下文环境允许访问远程Codebase。
@@ -112,6 +114,14 @@ JndiClient.main(JndiClient.java:28)
 
 **这也是为什么RMI的方式并不是那么通用的原因**
 
+# 二、JndiServerUseLocalClassFactory
+Jndi提供的`ReferenceWrapper`包含的Class对象在客户端的ClassPath中存在，就不存在访问远程Codebase的限制了
+
+## 2.1 使用
+1. 直接运行`JndiServerUseLocalClassFactory`
+2. 客户端运行即可弹出计算器
+
 # 参考
 [关于 JNDI 注入](https://paper.seebug.org/417/)
 [如何绕过高版本 JDK 的限制进行 JNDI 注入利用](https://paper.seebug.org/942/)
+[Exploiting JNDI Injections in Java](https://www.veracode.com/blog/research/exploiting-jndi-injections-java)
