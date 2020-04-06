@@ -99,5 +99,19 @@ com.sun.jndi.toolkit.url.GenericURLContext.lookup(GenericURLContext.java:203)
 javax.naming.InitialContext.lookup(InitialContext.java:411)
 JndiClient.main(JndiClient.java:28)
 ```
+
+# 限制
+利用条件如下：
+
+1. RMI客户端的上下文环境允许访问远程Codebase。
+2. 属性 java.rmi.server.useCodebaseOnly 的值必需为false。
+
+    然而从JDK 6u45、7u21开始，java.rmi.server.useCodebaseOnly 的默认值就是true。
+    当该值为true时，将禁用自动加载远程类文件，仅从CLASSPATH和当前VM的java.rmi.server.codebase 指定路径加载类文件。
+    使用这个属性来防止客户端VM从其他Codebase地址上动态加载类，增加了RMI ClassLoader的安全性。
+
+**这也是为什么RMI的方式并不是那么通用的原因**
+
 # 参考
 [关于 JNDI 注入](https://paper.seebug.org/417/)
+[如何绕过高版本 JDK 的限制进行 JNDI 注入利用](https://paper.seebug.org/942/)
