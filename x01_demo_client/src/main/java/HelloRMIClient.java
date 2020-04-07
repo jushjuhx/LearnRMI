@@ -15,10 +15,10 @@ public class HelloRMIClient {
         /*
          * 使用原生RMI的方式执行
          */
-        Registry r = LocateRegistry.getRegistry(addr, port);
-        HelloRMIInterface hello = (HelloRMIInterface) r.lookup(name);
-        String resp = hello.Echo(content);
-        System.out.println("without scheme:" + resp);
+        Registry registry1 = LocateRegistry.getRegistry(addr, port);
+        HelloRMIInterface hello1 = (HelloRMIInterface) registry1.lookup(name);
+        String resp1 = hello1.EchoString(content);
+        System.out.println("without scheme:" + resp1);
         /*
          * HelloRMIInterface hello1 = (HelloRMIInterface) r.lookup("rmi://localhost:" + port + "/" + name);
          * String resp1 = hello1.Echo(content);
@@ -29,20 +29,21 @@ public class HelloRMIClient {
         /*
          * 通过jndi的方式直接访问地址执行
          */
-        Context ctx1 = new InitialContext();
-        HelloRMIInterface hello1 = (HelloRMIInterface) ctx1.lookup("rmi://" + addr + ":" + port + "/" + name);
-        String resp1 = hello1.Echo(content);
-        System.out.println("with scheme:" + resp1);
+        Context ctx2 = new InitialContext();
+        HelloRMIInterface hello2 = (HelloRMIInterface) ctx2.lookup("rmi://" + addr + ":" + port + "/" + name);
+        String resp2 = hello2.EchoString(content);
+        System.out.println("with scheme:" + resp2);
 
         /*
          * 通过JNDI的方式，先初始化上下文，然后查找name
          */
-        Properties env = new Properties();
-        env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.rmi.registry.RegistryContextFactory");
-        env.put(Context.PROVIDER_URL, "rmi://" + addr + ":" + port);
-        Context ctx2 = new InitialContext(env);
-        HelloRMIInterface hello2 = (HelloRMIInterface) ctx2.lookup(name);
-        String resp2 = hello2.Echo(content);
-        System.out.println("use Properties:" + resp2);
+        Properties env3 = new Properties();
+        env3.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.rmi.registry.RegistryContextFactory");
+        env3.put(Context.PROVIDER_URL, "rmi://" + addr + ":" + port);
+        Context ctx3 = new InitialContext(env3);
+        HelloRMIInterface hello3 = (HelloRMIInterface) ctx3.lookup(name);
+        String resp3 = hello3.EchoString(content);
+        System.out.println("use Properties:" + resp3);
+
     }
 }

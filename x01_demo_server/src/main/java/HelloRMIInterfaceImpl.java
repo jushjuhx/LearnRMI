@@ -1,5 +1,4 @@
 import java.rmi.RemoteException;
-import java.rmi.server.RMIServerSocketFactory;
 import java.rmi.server.UnicastRemoteObject;
 
 /**
@@ -14,11 +13,20 @@ public class HelloRMIInterfaceImpl extends UnicastRemoteObject implements HelloR
     }
 
     @Override
-    public String Echo(String content) throws RemoteException {
+    public String EchoString(String content) throws RemoteException {
         /*
          * 故意加一对[]，将来抓包时便于识别请求、响应
          */
         System.out.println("收到" + content);
         return ("[" + content + "]");
+    }
+
+    @Override
+    public Object EchoObject(String content) throws RemoteException {
+        /*
+         * 故意加一对[]，将来抓包时便于识别请求、响应
+         */
+        System.out.println("收到" + content);
+        return (new Message(content));
     }
 }
