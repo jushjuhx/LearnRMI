@@ -2,7 +2,7 @@
 [Java RMI入门](http://scz.617.cn:8/network/202002221000.txt)
 1. 服务端（运行在`111.231.190.16`上）
     1. 通过`LocateRegistry.createRegistry(int port)`创建一个注册表，绑定到端口`1099`上。
-    2. 创建一个继承自`Remote`的对象，该对象创建后，实际上就有了
+    2. 创建一个实现`Remote`接口并继承`UnicastRemoteObject`的对象，该对象创建后，实际上就产生了动态端口。
     3. 最后指定一个名字，将该对象`rebind`到注册表中。
         1. 除了使用注册表绑定一个名字外，还可以通过`static java.rmi.Naming.rebind`绑定`rmi://ip:port/name`形式的名字
            使用Naming绑定时，查找也是使用`static java.rmi.Naming.lookup`进行查找
