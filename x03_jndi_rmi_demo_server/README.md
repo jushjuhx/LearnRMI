@@ -165,7 +165,7 @@ Jndi提供的`ReferenceWrapper`包含的Class对象在客户端的ClassPath中�
 2. 客户端运行即可弹出计算器
 
 # 参考
-[关于 JNDI 注入](https://paper.seebug.org/417/)
-[如何绕过高版本 JDK 的限制进行 JNDI 注入利用](https://paper.seebug.org/942/)
-[Exploiting JNDI Injections in Java](https://www.veracode.com/blog/research/exploiting-jndi-injections-java)
-[BlackHat 2016 回顾之 JNDI 注入简单解析](https://rickgray.me/2016/08/19/jndi-injection-from-theory-to-apply-blackhat-review/)
+1. [关于 JNDI 注入](https://paper.seebug.org/417/)
+2. [如何绕过高版本 JDK 的限制进行 JNDI 注入利用](https://paper.seebug.org/942/)
+3. [Exploiting JNDI Injections in Java](https://www.veracode.com/blog/research/exploiting-jndi-injections-java)
+4. [BlackHat 2016 回顾之 JNDI 注入简单解析](https://rickgray.me/2016/08/19/jndi-injection-from-theory-to-apply-blackhat-review/)
