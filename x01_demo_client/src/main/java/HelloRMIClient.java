@@ -1,3 +1,5 @@
+import javax.naming.Context;
+import javax.naming.InitialContext;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 
@@ -11,6 +13,20 @@ public class HelloRMIClient {
         Registry r = LocateRegistry.getRegistry(addr, port);
         HelloRMIInterface hello = (HelloRMIInterface) r.lookup(name);
         String resp = hello.Echo(content);
-        System.out.println(resp);
+        System.out.println("without scheme:" + resp);
+        /*
+         * HelloRMIInterface hello1 = (HelloRMIInterface) r.lookup("rmi://localhost:" + port + "/" + name);
+         * String resp1 = hello1.Echo(content);
+         * System.out.println("with scheme:" + resp1);
+         * 这种方式是行不通的，lookup找不到
+         */
+
+        /*
+         * 通过jndi的方式也能行得通
+         */
+        Context ctx = new InitialContext();
+        HelloRMIInterface hello1 = (HelloRMIInterface) ctx.lookup("rmi://localhost:" + port + "/" + name);
+        String resp1 = hello1.Echo(content);
+        System.out.println("with scheme:" + resp1);
     }
 }
